@@ -1142,8 +1142,8 @@ footer.foot {
               <svg id="ccSvg" viewBox="0 0 560 230" height="230" tabindex="0" role="img" aria-labelledby="ccLabel" aria-describedby="ccNote"></svg>
               <div class="cc-tip" id="ccTip" hidden></div>
             </div>
-            <small class="hint-inline cc-note" id="ccNote"></small>
-            <small class="hint-inline">Hover the curve to read values. Fitted to a measured Bambu Lab A1 run in a ~20 °C room; enclosed printers cool slower.</small>
+            <small class="hint-inline cc-note" id="ccNote" hidden></small>
+            <small class="hint-inline">Based on real measurements and Newton's law of cooling.</small>
           </div>
           <div class="field">
             <label for="minheight" title="Parts below this height risk jamming the toolhead; 0 = no check">Min height check</label>
@@ -1964,7 +1964,7 @@ function renderCoolCurve() {
   const svg = $('ccSvg'); if (!svg) return;
   const t0 = ccNum('ccstart'), ta = ccNum('ccroom'), eject = ccNum('cooltemp');
   const note = $('ccNote');
-  if (!isFinite(t0) || !isFinite(ta) || !isFinite(eject)) { svg.innerHTML = ''; note.textContent = 'Enter valid temperatures to see the curve.'; note.classList.remove('warn'); ccState = null; return; }
+  if (!isFinite(t0) || !isFinite(ta) || !isFinite(eject)) { svg.innerHTML = ''; note.textContent = 'Enter valid temperatures to see the curve.'; note.hidden = false; note.classList.remove('warn'); ccState = null; return; }
   const pushMin = coolMode === 'time' ? coolTimeSeconds() / 60 : NaN;
   // draw in CSS pixels so labels keep their size on wide and narrow screens
   const w = Math.round(svg.getBoundingClientRect().width);
@@ -2012,7 +2012,9 @@ function renderCoolCurve() {
   g += '<rect id="ccHit" x="' + L + '" y="0" width="' + (W - L - R) + '" height="' + H + '" fill="transparent"/>';
   svg.innerHTML = g;
   svg.setAttribute('aria-label', 'Estimated bed cooling from ' + t0 + ' °C to room temperature ' + ta + ' °C over 60 minutes');
-  note.textContent = msg;
+  // only speak up when something is off; the chart shows the rest
+  note.textContent = warn ? msg : '';
+  note.hidden = !warn;
   note.classList.toggle('warn', warn);
   ccState = { t0, ta, x, y, cursorT: ccState ? ccState.cursorT : null };
 }
