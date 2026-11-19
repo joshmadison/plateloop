@@ -395,14 +395,23 @@ def test_sequence_multi_plate(client, multi_3mf):
 
 def test_sequence_multi_plate_skip_and_validation(client, multi_3mf):
     files = {"file": ("m.gcode.3mf", multi_3mf, "application/octet-stream")}
-    # skip plate 1 -> output keeps the FIRST ACTIVE plate (2)
+    # skip plate 1 -> output keeps the FIRST ACTIVE plate (2), renumbered to
+    # plate 1 so Bambu Studio can open the single-plate file
     r = client.post("/api/sequence", files=files,
                     data={"plate_prints": '{"1": 0, "2": 2}', "min_height_mm": "0"})
     assert r.status_code == 200, r.text
     with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
         names = zf.namelist()
-        assert "Metadata/plate_2.gcode" in names and "Metadata/plate_1.gcode" not in names
-        gc = zf.read("Metadata/plate_2.gcode").decode()
+        assert "Metadata/plate_1.gcode" in names and "Metadata/plate_2.gcode" not in names
+        assert "Metadata/plate_1.png" in names and "Metadata/plate_2.png" not in names
+        ms = zf.read("Metadata/model_settings.config").decode()
+        assert 'key="plater_id" value="1"' in ms and "plate_2" not in ms
+        rels = zf.read("Metadata/_rels/model_settings.config.rels").decode()
+        assert "/Metadata/plate_1.gcode" in rels and "plate_2" not in rels
+        si = zf.read("Metadata/slice_info.config").decode()
+        assert 'key="index" value="1"' in si
+        assert '"plate_1"' in zf.read("Metadata/filament_sequence.json").decode()
+        gc = zf.read("Metadata/plate_1.gcode").decode()
     assert sum(1 for ln in gc.splitlines() if "step 7" in ln) == 2
     assert all("X85" in ln for ln in gc.splitlines() if "step 7" in ln)
     # all skipped -> 422

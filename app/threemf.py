@@ -638,23 +638,40 @@ def _plate_asset_index(name: str) -> int | None:
     return None
 
 
+def _renumber_asset(name: str, new_index: int) -> str:
+    """Per-plate asset path with its plate number replaced (shared paths unchanged)."""
+    for rx in _PLATE_ASSET_RES:
+        m = rx.match(name)
+        if m:
+            return name[:m.start(1)] + str(new_index) + name[m.end(1):]
+    return name
+
+
 def _xml_bytes(root: ET.Element) -> bytes:
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
 
 
-def _trim_model_settings(xml_bytes: bytes, keep: int) -> bytes:
+def _trim_model_settings(xml_bytes: bytes, keep: int, new_index: int | None = None) -> bytes:
     root = _safe_fromstring(xml_bytes)
     for plate in list(root.findall("plate")):
         pid = plate.find("metadata[@key='plater_id']")
         if pid is not None and (pid.get("value") or "").isdigit() and int(pid.get("value")) != keep:
             root.remove(plate)
+            continue
+        if new_index is not None and new_index != keep:
+            if pid is not None:
+                pid.set("value", str(new_index))
+            for meta in plate.findall("metadata"):
+                value = meta.get("value") or ""
+                if value.startswith("Metadata/"):
+                    meta.set("value", _renumber_asset(value, new_index))
     for el in root:
         el.tail = "\n  "
     root.text = "\n  "
     return _xml_bytes(root)
 
 
-def _trim_rels(xml_bytes: bytes, keep_gcode: str) -> bytes:
+def _trim_rels(xml_bytes: bytes, keep_gcode: str, new_gcode: str | None = None) -> bytes:
     root = _safe_fromstring(xml_bytes)
     keep_base = keep_gcode.split("/")[-1]
     for rel in list(root):
@@ -663,10 +680,14 @@ def _trim_rels(xml_bytes: bytes, keep_gcode: str) -> bytes:
         target = rel.get("Target", "")
         if target.lower().endswith(".gcode") and target.split("/")[-1] != keep_base:
             root.remove(rel)
+        elif new_gcode and target.lower().endswith(".gcode"):
+            rel.set("Target", "/" + new_gcode.lstrip("/"))
     return _xml_bytes(root)
 
 
-def _trim_slice_info(xml_bytes: bytes, keep: int, totals: dict | None) -> bytes:
+def _trim_slice_info(
+    xml_bytes: bytes, keep: int, totals: dict | None, new_index: int | None = None
+) -> bytes:
     """Keep only the target plate and rewrite its sequence totals.
 
     totals: {"prediction_sec": float, "weight_g": float,
@@ -680,6 +701,8 @@ def _trim_slice_info(xml_bytes: bytes, keep: int, totals: dict | None) -> bytes:
         if idx is None or (idx.get("value") or "").strip() != str(keep):
             root.remove(plate)
             continue
+        if new_index is not None:
+            idx.set("value", str(new_index))
         if not totals:
             continue
         pred = plate.find("metadata[@key='prediction']")
@@ -705,13 +728,15 @@ def _trim_slice_info(xml_bytes: bytes, keep: int, totals: dict | None) -> bytes:
     return _xml_bytes(root)
 
 
-def _trim_filament_sequence(raw: bytes, keep: int) -> bytes:
+def _trim_filament_sequence(raw: bytes, keep: int, new_index: int | None = None) -> bytes:
     try:
         data = json.loads(raw.decode("utf-8", "ignore"))
     except Exception:
         return raw
     if isinstance(data, dict):
-        data = {k: v for k, v in data.items() if k == f"plate_{keep}"}
+        kept = data.get(f"plate_{keep}")
+        new_key = f"plate_{new_index if new_index is not None else keep}"
+        data = {new_key: kept} if kept is not None else {}
     return json.dumps(data).encode("utf-8")
 
 
@@ -725,7 +750,9 @@ def repack_single_plate_3mf(
 
     plate_N.gcode is replaced with new_gcode (md5 recomputed, uppercase);
     assets and config entries of all other plates are removed so the printer
-    sees exactly one plate. slice_totals ({prediction_sec, weight_g,
+    sees exactly one plate. The kept plate is always renumbered to plate 1:
+    Bambu Studio refuses a single-plate file whose only plate is e.g.
+    plate 5 ("no geometry data"), and _rels/.rels points at plate_1.png. slice_totals ({prediction_sec, weight_g,
     per_filament}) optionally rewrites the remaining plate's slice_info
     metadata (weight, prediction and per-(type,color) filament usage).
     """
@@ -744,32 +771,47 @@ def repack_single_plate_3mf(
             m = re.search(r"plate_(\d+)", target)
             plate_index = int(m.group(1)) if m else 1
         target_md5 = target + ".md5"
+        new_index = 1
+        out_gcode = "Metadata/plate_1.gcode"
+
+        def _as(item: zipfile.ZipInfo, name: str) -> zipfile.ZipInfo:
+            if name == item.filename:
+                return item
+            zi = zipfile.ZipInfo(name, date_time=item.date_time)
+            zi.compress_type = item.compress_type
+            zi.external_attr = item.external_attr
+            return zi
+
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
             for item in src.infolist():
                 name = item.filename
                 if name == target:
-                    dst.writestr(item, new_bytes)
+                    dst.writestr(_as(item, out_gcode), new_bytes)
                     continue
                 if name == target_md5:
-                    dst.writestr(item, new_md5)
+                    dst.writestr(_as(item, out_gcode + ".md5"), new_md5)
                     continue
                 asset_idx = _plate_asset_index(name)
-                if asset_idx is not None and asset_idx != plate_index:
+                if asset_idx is not None:
+                    if asset_idx != plate_index:
+                        continue
+                    dst.writestr(_as(item, _renumber_asset(name, new_index)), src.read(name))
                     continue
                 if name.endswith("model_settings.config"):
-                    dst.writestr(item, _trim_model_settings(src.read(name), plate_index))
+                    dst.writestr(item, _trim_model_settings(src.read(name), plate_index, new_index))
                     continue
                 if name.endswith("model_settings.config.rels"):
-                    dst.writestr(item, _trim_rels(src.read(name), target))
+                    dst.writestr(item, _trim_rels(src.read(name), target, out_gcode))
                     continue
                 if name.endswith("slice_info.config"):
-                    dst.writestr(item, _trim_slice_info(src.read(name), plate_index, slice_totals))
+                    dst.writestr(item, _trim_slice_info(
+                        src.read(name), plate_index, slice_totals, new_index))
                     continue
                 if name.endswith("filament_sequence.json"):
-                    dst.writestr(item, _trim_filament_sequence(src.read(name), plate_index))
+                    dst.writestr(item, _trim_filament_sequence(src.read(name), plate_index, new_index))
                     continue
                 dst.writestr(item, src.read(name))
             if target_md5 not in names:
-                dst.writestr(target_md5, new_md5)
+                dst.writestr(out_gcode + ".md5", new_md5)
     out.seek(0)
     return out
