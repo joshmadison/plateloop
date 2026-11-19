@@ -246,6 +246,30 @@ def test_ejection_g4_s_format():
     assert "G4 P" not in snip, "must NOT use G4 P<ms>"
 
 
+def test_dwell_lines_split_at_90_s():
+    """Bambu caps one G4 at 90 s: longer waits become a chain of G4 lines."""
+    from app.gcode import G4_MAX_S, _dwell_lines
+
+    assert _dwell_lines(0, "x") == []
+    assert _dwell_lines(60, "x") == ["G4 S60 ; x"]
+    assert _dwell_lines(90, "x") == ["G4 S90 ; x"]
+    assert _dwell_lines(91, "x") == ["G4 S90 ; x (1/2)", "G4 S1 ; x (2/2)"]
+    for total in (179, 180, 600, 3600, 43200):
+        lines = _dwell_lines(total, "x")
+        secs = [int(ln.split()[1][1:]) for ln in lines]
+        assert sum(secs) == total
+        assert max(secs) <= G4_MAX_S
+
+
+def test_ejection_never_emits_g4_over_90_s():
+    import re
+
+    snip = build_ejection_snippet(max_z_height=30.0, safety_wait_s=600, cool_time_s=3600)
+    waits = [int(m) for m in re.findall(r"^G4 S(\d+)", snip, re.MULTILINE)]
+    assert waits and max(waits) <= 90
+    assert sum(waits) == 3600 + 600
+
+
 def test_ejection_implied_lift_between_objects():
     """Multi-object: lift+repark+descend between objects (collision avoidance)."""
     objects = [

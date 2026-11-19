@@ -78,7 +78,14 @@ def test_cooldown_defaults_to_timed_5_min(client, tall_3mf):
     gc = _sequence_gcode(client, tall_3mf)
     eject = gc.split("; ===== Phase 2")[1]
     assert "M140 S30 ; step 8" in eject
-    assert "G4 S300 ; step 8: cool down for 5 min" in gc
+    # 300 s -> chained G4 lines (Bambu caps one G4 at 90 s): 90+90+90+30
+    cool = [ln for ln in gc.splitlines() if "step 8: cool down for 5 min" in ln]
+    assert cool[:4] == [
+        "G4 S90 ; step 8: cool down for 5 min (1/4)",
+        "G4 S90 ; step 8: cool down for 5 min (2/4)",
+        "G4 S90 ; step 8: cool down for 5 min (3/4)",
+        "G4 S30 ; step 8: cool down for 5 min (4/4)",
+    ]
     assert "M190 S30" not in gc
     # 'M140 S0' stays reserved for the single native shutdown
     assert sum(1 for ln in gc.splitlines() if ln.strip().startswith("M140 S0")) == 1

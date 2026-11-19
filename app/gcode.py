@@ -169,6 +169,25 @@ def _fmt_duration_s(sec: int) -> str:
     return f"{m} min" if m else f"{r} s"
 
 
+# Bambu firmware caps a single G4 dwell at 90 s (community-documented, see
+# x1plus-testing Gcode.md); longer waits are written as a chain of G4 lines.
+G4_MAX_S = 90
+
+
+def _dwell_lines(seconds: int, comment: str) -> list[str]:
+    """G4 S<n> lines totalling `seconds`, none longer than G4_MAX_S."""
+    seconds = int(seconds)
+    if seconds <= 0:
+        return []
+    chunks = [G4_MAX_S] * (seconds // G4_MAX_S)
+    if seconds % G4_MAX_S:
+        chunks.append(seconds % G4_MAX_S)
+    if len(chunks) == 1:
+        return [f"G4 S{chunks[0]} ; {comment}"]
+    n = len(chunks)
+    return [f"G4 S{c} ; {comment} ({i}/{n})" for i, c in enumerate(chunks, 1)]
+
+
 def build_ejection_snippet(
     max_z_height: float,
     t_lift: float = 5.0,
@@ -194,11 +213,11 @@ def build_ejection_snippet(
       7. Toolhead X to the bbox center
       8. Cool down: cool_time_s == 0 -> wait for cool_temp_bed (M140 + M190);
          cool_time_s > 0 -> lower the bed target to cool_temp_bed and wait
-         exactly that long (G4), whatever temperature the bed has reached. G-code
+         exactly that long (chained G4, max 90 s each), whatever temperature the bed has reached. G-code
          has no "wait for temperature, but at most N s", and M190 alone can
          hang forever when the bed cannot get that cool (enclosure, warm
          room), so the fixed time is the safe choice.
-      9. Safety wait safety_wait_s (G4)
+      9. Safety wait safety_wait_s (chained G4, max 90 s each)
      10. Push - Y to front_lip_y (object slides over the plate's front edge)
      11. Bed fully forward - Y to rear_limit (re-park)
      -> continue at 6
@@ -284,15 +303,13 @@ def build_ejection_snippet(
             lines.append(
                 f"M140 S{cool_temp_bed} ; step 8: lower bed target, heater stays off while cooling"
             )
-            lines.append(
-                f"G4 S{int(cool_time_s)} ; step 8: cool down for {_fmt_duration_s(cool_time_s)}"
+            lines.extend(
+                _dwell_lines(cool_time_s, f"step 8: cool down for {_fmt_duration_s(cool_time_s)}")
             )
         else:
             lines.append(f"M140 S{cool_temp_bed} ; step 8: set bed target to cooldown temp")
             lines.append(f"M190 S{cool_temp_bed} ; step 8: wait until bed reached cooldown temp")
-        lines.append(
-            f"G4 S{int(safety_wait_s)} ; step 9: safety wait {safety_wait_s}s"
-        )
+        lines.extend(_dwell_lines(safety_wait_s, f"step 9: safety wait {safety_wait_s}s"))
         lines.append(
             f"G1 Y{_fmt(push_end_y)} F{push_speed} ; step 10{tag}: push - "
             f"bed fully retracts, toolhead pushes object off plate"
