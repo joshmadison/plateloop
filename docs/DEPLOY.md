@@ -156,6 +156,7 @@ All values live in `.env` (see `.env.example`).
 | `MAX_OUTPUT_MB` | `200` | Refuse builds whose merged gcode would exceed this size. |
 | `MAX_3MF_UNCOMPRESSED_MB` | `400` | Total uncompressed 3MF limit (zip-bomb guard). |
 | `MAX_3MF_ENTRIES` | `20000` | Maximum number of entries in a 3MF archive. |
+| `PLATELOOP_MEM_LIMIT` | `2g` | Memory limit of the app container. Files are processed in memory; use about `4g` for 300 MB uploads. |
 | `RATE_LIMIT_REQUESTS` | `60` | POST `/api/*` requests per IP per window. `0` disables. |
 | `RATE_LIMIT_WINDOW_S` | `600` | Window in seconds. |
 | `MAX_CONCURRENT_REQUESTS` | `1` | Simultaneous upload/build requests across the instance. One at a time keeps peak memory bounded on a 2 GB container. |
