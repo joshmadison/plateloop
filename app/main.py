@@ -31,6 +31,7 @@ from .printer_db import (
     is_known_printer,
     resolve_display_name,
 )
+from .schedule import job_duration_s
 from .site import DEFAULT_SUPPORT_LABEL, DEFAULT_SUPPORT_URL
 from .threemf import (
     extract_plate_gcodes,
@@ -519,6 +520,19 @@ async def api_animation(
     return kf
 
 
+def _job_durations(info, active: dict, plate_objects: dict, cool_time_s: int, safety_wait_s: int) -> list[int]:
+    """Estimated wall time of every copy, in build order (plates ascending)."""
+    out = []
+    for idx in sorted(active):
+        p = next((p for p in info.plates if p.index == idx), None)
+        n_obj = len(plate_objects.get(idx) or []) or 1
+        for _ in range(active[idx]):
+            out.append(job_duration_s(
+                (p.print_time_sec if p else 0) or 0, n_obj, cool_time_s, safety_wait_s, first=not out,
+            ))
+    return out
+
+
 @app.post("/api/sequence")
 async def api_sequence(
     file: UploadFile = File(...),
@@ -631,19 +645,20 @@ async def api_sequence(
     # slice_info totals of the remaining plate: printed weight/time of ALL jobs
     total_prints = sum(active.values())
     total_weight = 0.0
-    total_prediction = 0.0
     per_filament: dict = {}
     for idx, n in active.items():
         p = next((p for p in info.plates if p.index == idx), None)
         if not p:
             continue
-        total_prediction += (p.print_time_sec or 0) * n
         total_weight += (p.filament_weight_g or sum(f.get("weight_g", 0) for f in p.filaments)) * n
         for f in p.filaments:
             key = (f.get("type", ""), f.get("color", ""))
             entry = per_filament.setdefault(key, {"used_g": 0.0, "used_m": 0.0})
             entry["used_g"] += (f.get("weight_g", 0) or 0) * n
             entry["used_m"] += (f.get("used_m", 0) or 0) * n
+
+    # wall time incl. ejection and re-heat, shown by Bambu Studio / Handy
+    total_prediction = float(sum(_job_durations(info, active, plate_objects, cool_time_s, safety_wait_s)))
 
     keep_plate = min(active)
     out_buf = await run_in_threadpool(

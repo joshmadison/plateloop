@@ -1206,6 +1206,24 @@ function coolTimeSeconds() {
   const min = parseFloat(String($('cooltime').value || '').replace(',', '.'));
   return Math.max(60, Math.min(3600, Math.round((Number.isFinite(min) ? min : 45) * 60)));
 }
+// Wall time of one copy: slicer print time + ejection (+ re-heat for later
+// copies). Mirrors app/schedule.py job_duration_s - keep the numbers in sync.
+const EST = { EJECT_BASE_S: 30, PUSH_MOVES_S: 20, REHEAT_S: 180, TEMP_MODE_COOL_S: 900 };
+function jobDurationSec(p, first) {
+  const n = Math.max(1, (p.objects || []).length);
+  const cool = coolMode === 'time' ? coolTimeSeconds() : EST.TEMP_MODE_COOL_S;
+  const safety = Math.max(0, parseInt($('safetywait').value, 10) || 0);
+  return Math.round((p.print_time_sec || 0) + EST.EJECT_BASE_S +
+    n * (cool + safety + EST.PUSH_MOVES_S) + (first ? 0 : EST.REHEAT_S));
+}
+// [{plate, sec}] for every copy in build order (plates ascending)
+function sequenceJobs(plates, prints) {
+  const jobs = [];
+  plates.slice().sort((a, b) => a.index - b.index).forEach(function (p) {
+    for (let i = 0; i < (prints[p.index] || 0); i++) jobs.push({ plate: p.index, sec: jobDurationSec(p, !jobs.length) });
+  });
+  return jobs;
+}
 function coolSummary() {
   if (coolMode === 'temp') return 'cool to ' + $('cooltemp').value + ' °C';
   const s = coolTimeSeconds(), m = Math.floor(s / 60), r = s % 60;
@@ -1443,13 +1461,15 @@ function renderTotals() {
   if (!s) return;
   const prints = readPlatePrints();
   const plates = (s.plates && s.plates.length) ? s.plates : [{ index: 1, print_time_sec: s.print_time_sec, filament_weight_g: s.filament_weight_g, filaments: s.filaments }];
-  let totalPrints = 0, totalFil = 0, totalSec = 0;
+  let totalPrints = 0, totalFil = 0;
   const breakdown = [];
+  const jobs = sequenceJobs(plates, prints);
+  const totalSec = jobs.reduce((a, j) => a + j.sec, 0);
   plates.forEach(function (p) {
     const n = prints[p.index] || 0;
+    const plateSec = jobs.filter(j => j.plate === p.index).reduce((a, j) => a + j.sec, 0);
     totalPrints += n;
     totalFil += (p.filament_weight_g || 0) * n;
-    totalSec += (p.print_time_sec || 0) * n;
     breakdown.push('Plate ' + p.index + ': ' + n + (n === 0 ? ' (skipped)' : ''));
     const lowEl = $('plateLow-' + p.index);
     if (lowEl && lowEl.dataset.low !== '') {
@@ -1464,7 +1484,7 @@ function renderTotals() {
       est.classList.toggle('is-skip', n === 0);
       est.textContent = n === 0
         ? 'skipped'
-        : '= ' + fmtTime((p.print_time_sec || 0) * n) + ' · ' +
+        : '= ' + fmtTime(plateSec) + ' · ' +
           (Math.round((p.filament_weight_g || 0) * n * 10) / 10).toLocaleString('en-US') + ' g';
     }
   });
@@ -1472,7 +1492,7 @@ function renderTotals() {
   $('totalGrid').innerHTML =
     '<div class="cell"><div class="v">' + totalPrints + '</div><div class="k">prints total</div></div>' +
     '<div class="cell"><div class="v">' + (Math.round(totalFil)).toLocaleString('en-US') + '<small style="font-size:.7em;color:var(--text-3)"> g</small></div><div class="k">filament total</div></div>' +
-    '<div class="cell" title="Slicer print time. Cooldown and safety waits come on top for every copy."><div class="v">' + fmtTime(totalSec) + '</div><div class="k">net print time</div></div>' +
+    '<div class="cell" title="Estimate: slicer print time plus cooldown, safety wait, push and re-heat for every copy."><div class="v">' + fmtTime(totalSec) + '</div><div class="k">total time</div></div>' +
     (plates.length > 1 ? '<div class="cell wide"><div class="v">' + breakdown.join(' · ') + '</div><div class="k">prints per plate</div></div>' : '') +
     (seqFil.length ? '<div class="cell wide"><div class="v" style="display:flex;gap:6px;flex-wrap:wrap">' + _filChips(seqFil) + '</div><div class="k">filament per color</div></div>' : '');
   refreshHeightBadgeInternal();
@@ -1498,7 +1518,7 @@ function openConfirm() {
   const activePlates = plates.filter(p => (prints[p.index] || 0) > 0);
   const totalPrints = activePlates.reduce((a, p) => a + (prints[p.index] || 0), 0);
   const totalFil = activePlates.reduce((a, p) => a + (p.filament_weight_g || 0) * (prints[p.index] || 0), 0);
-  const totalSec = activePlates.reduce((a, p) => a + (p.print_time_sec || 0) * (prints[p.index] || 0), 0);
+  const totalSec = sequenceJobs(activePlates, prints).reduce((a, j) => a + j.sec, 0);
   const plateList = activePlates.map(p => 'Plate ' + p.index + ': ' + prints[p.index]).join(' · ') || 'none';
   const minH = parseFloat($('minheight').value);
   let alerts = '';
@@ -1531,7 +1551,7 @@ function openConfirm() {
     '<div class="row-l"><span class="k">Plates</span><span class="v">' + plateList + '</span></div>' +
     '<div class="row-l"><span class="k">Prints</span><span class="v">' + totalPrints + ' total</span></div>' +
     '<div class="row-l"><span class="k">Filament</span><span class="v">~' + (Math.round(totalFil * 10) / 10).toLocaleString('en-US') + ' g' + (_activeTypes(activePlates) ? ' ' + esc(_activeTypes(activePlates)) : '') + '</span></div>' +
-    '<div class="row-l"><span class="k">Print time</span><span class="v">~' + fmtTime(totalSec) + '</span></div>' +
+    '<div class="row-l"><span class="k">Total time</span><span class="v">~' + fmtTime(totalSec) + '</span></div>' +
     '<hr>' +
     '<div class="row-l"><span class="k">Ejection</span><span class="v">ON · ' + esc(coolSummary()) + '</span></div>' +
     '<div class="row-l"><span class="k">Push height / lift height</span><span class="v">' + esc($('pushz').value) + ' / ' + esc($('tlift').value) + ' mm</span></div>' +
@@ -1697,6 +1717,7 @@ function onCoolModeChange(mode) {
   if (mode === coolMode) return;
   setCoolMode(mode);
   if (lastBuildName) $('staleNote').classList.add('show');
+  renderTotals();
   if (stats) loadAnimation();
 }
 $('coolMode').addEventListener('click', e => {

@@ -179,8 +179,9 @@ single-plate `.gcode.3mf` whose gcode runs the plates back to back:
 | Min height check | `7 mm` | Rejects plates whose lowest part is too short for a clean push. Heights are measured per object from the gcode. `0` disables the check. |
 
 The download is named after your file, e.g. `model_x12.gcode.3mf` for 12
-total prints. The time shown in the app is the slicer's print time; cooldown
-and safety waits come on top for every copy.
+total prints. The total time shown in the app is an estimate: the slicer's
+print time plus cooldown, safety wait, push and re-heat for every copy (the
+cooldown runs once per object on the plate).
 
 > [!TIP]
 > G-code cannot say "wait for 30 °C, but at most 5 minutes": `M190` waits
