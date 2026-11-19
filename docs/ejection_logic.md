@@ -57,7 +57,7 @@ marked *needs a test print* until this is confirmed on hardware.
 | Lift height | `t_lift` | Extra height above the tallest bounding box on the plate | 5 mm |
 | Push height | `push_z` | Gap between pusher and print plate while descending | 0.4 mm |
 | Target temperature | `cool_temp_bed` | Bed temperature to cool down to (temperature mode); bed target in fixed-time mode | 30 °C |
-| Cooldown time | `cool_time_s` | `0` = wait for `cool_temp_bed` (`M190`); `> 0` = fixed cooldown in seconds (chained `G4`, max 90 s per line), never stalls | 300 s (API/UI); 0 in the library functions |
+| Cooldown time | `cool_time_s` | `0` = wait for `cool_temp_bed` (`M190`); `> 0` = fixed cooldown in seconds (chained `G4`, max 90 s per line), never stalls | 2700 s = 45 min (API/UI); 0 in the library functions |
 | Safety wait | `safety_wait_s` | Wait time after reaching the target temperature | 60 s |
 
 ### 3.2 Printer parameters (from `printers.json`, see

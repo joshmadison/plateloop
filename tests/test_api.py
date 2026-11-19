@@ -72,20 +72,17 @@ def _sequence_gcode(client, data_3mf, **form) -> str:
         return zf.read([n for n in zf.namelist() if n.endswith(".gcode")][0]).decode()
 
 
-def test_cooldown_defaults_to_timed_5_min(client, tall_3mf):
-    # Default: lower the bed target to 30 °C and wait a fixed 5 minutes.
+def test_cooldown_defaults_to_timed_45_min(client, tall_3mf):
+    # Default: lower the bed target to 30 °C and wait a fixed 45 minutes.
     # Never M190 for the ejection, so an enclosed printer cannot hang.
     gc = _sequence_gcode(client, tall_3mf)
     eject = gc.split("; ===== Phase 2")[1]
     assert "M140 S30 ; step 8" in eject
-    # 300 s -> chained G4 lines (Bambu caps one G4 at 90 s): 90+90+90+30
-    cool = [ln for ln in gc.splitlines() if "step 8: cool down for 5 min" in ln]
-    assert cool[:4] == [
-        "G4 S90 ; step 8: cool down for 5 min (1/4)",
-        "G4 S90 ; step 8: cool down for 5 min (2/4)",
-        "G4 S90 ; step 8: cool down for 5 min (3/4)",
-        "G4 S30 ; step 8: cool down for 5 min (4/4)",
-    ]
+    # 2700 s -> 30 chained G4 S90 lines (Bambu caps one G4 at 90 s)
+    cool = [ln for ln in eject.splitlines() if "step 8: cool down for 45 min" in ln]
+    assert len(cool) == 30
+    assert cool[0] == "G4 S90 ; step 8: cool down for 45 min (1/30)"
+    assert cool[-1] == "G4 S90 ; step 8: cool down for 45 min (30/30)"
     assert "M190 S30" not in gc
     # 'M140 S0' stays reserved for the single native shutdown
     assert sum(1 for ln in gc.splitlines() if ln.strip().startswith("M140 S0")) == 1
@@ -119,7 +116,7 @@ def test_preview_labels_follow_cooldown_mode(client, tall_3mf):
         assert r.status_code == 200
         return [f["label"] for f in r.json()["frames"]]
 
-    assert "Cooling for 5 min" in labels()
+    assert "Cooling for 45 min" in labels()
     assert "Cooling to 30°C" in labels(cool_time_s="0")
 
 

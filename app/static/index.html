@@ -1037,7 +1037,7 @@ footer.foot {
           <div class="two">
             <div class="field" id="coolTimeField">
               <label for="cooltime" title="Time the bed cools before every push">Cooldown time</label>
-              <div class="input-unit"><input type="number" id="cooltime" value="5" min="1" max="60" step="any" autocomplete="off"><span>min</span></div>
+              <div class="input-unit"><input type="number" id="cooltime" value="45" min="1" max="60" step="any" autocomplete="off"><span>min</span></div>
               <small class="hint-inline">Cooling time before each push<span class="range"> · allowed 1–60 min</span></small>
             </div>
             <div class="field" id="coolTempField" hidden>
@@ -1204,7 +1204,7 @@ let coolMode = 'time';
 function coolTimeSeconds() {
   if (coolMode !== 'time') return 0;
   const min = parseFloat(String($('cooltime').value || '').replace(',', '.'));
-  return Math.max(60, Math.min(3600, Math.round((Number.isFinite(min) ? min : 5) * 60)));
+  return Math.max(60, Math.min(3600, Math.round((Number.isFinite(min) ? min : 45) * 60)));
 }
 function coolSummary() {
   if (coolMode === 'temp') return 'cool to ' + $('cooltemp').value + ' °C';

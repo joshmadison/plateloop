@@ -173,7 +173,7 @@ single-plate `.gcode.3mf` whose gcode runs the plates back to back:
 | Push height | `0.4 mm` | Height of the toolhead edge above the plate during the push. |
 | Lift height | `5 mm` | Extra clearance above the tallest object before moving. |
 | Cooldown | `Fixed time` | *Fixed time* waits a set time before every push and can never stall. *Until temperature* waits (`M190`) until the bed reaches the ejection temperature. |
-| Cooldown time | `5 min` | How long the bed cools before every push (fixed-time mode, 1–60 min). |
+| Cooldown time | `45 min` | How long the bed cools before every push (fixed-time mode, 1–60 min). |
 | Ejection bed temp | `30 °C` | Temperature to wait for (temperature mode). In fixed-time mode the bed target is lowered to it so the heater stays off. |
 | Safety wait | `60 s` | Extra dwell after the cooldown, before the push. |
 | Min height check | `7 mm` | Rejects plates whose lowest part is too short for a clean push. Heights are measured per object from the gcode. `0` disables the check. |
@@ -232,7 +232,7 @@ Cloudflare caveats and the legal checklist — is in
   rear park zone** in their native end gcode: the pusher starts at the rear
   bed edge, so keep the rear-most part at least ~35 mm away from it. These
   models are all marked *needs a test print*.
-- The default cooldown is a fixed time (5 min) and never stalls; check that
+- The default cooldown is a fixed time (45 min) and never stalls; check that
   your parts release after it. In *Until temperature* mode the cooldown uses
   `M190 S<temp>`: Bambu firmware waits until the bed has cooled down, but on
   other firmware (Marlin-based in particular) `M190 S` may only wait while
