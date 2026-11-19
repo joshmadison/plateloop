@@ -188,6 +188,43 @@ def _dwell_lines(seconds: int, comment: str) -> list[str]:
     return [f"G4 S{c} ; {comment} ({i}/{n})" for i, c in enumerate(chunks, 1)]
 
 
+def _fmt_hm(sec: int) -> str:
+    """'12 h 30 min', '45 min' for schedule comments."""
+    h, m = divmod(int(sec) // 60, 60)
+    if h and m:
+        return f"{h} h {m} min"
+    return f"{h} h" if h else f"{m} min"
+
+
+def schedule_pause_block(
+    wait_s: int, job_no: int, total_jobs: int, resume_at: str = "", bambu: bool = True
+) -> str:
+    """Idle wait before a print in a print-window schedule.
+
+    Heaters and fans off, then a chain of G4 S<=90 dwells (the printer has no
+    readable clock, so the wait is pure elapsed time). Placed only between
+    a finished ejection and the next print's re-heat, never mid-print, so no
+    part is left on the plate while it cools down.
+    """
+    when = f", resumes ~{resume_at}" if resume_at else ""
+    lines = [
+        f"; ===== plateloop schedule: wait {_fmt_hm(wait_s)} before print "
+        f"{job_no} of {total_jobs}{when} =====",
+        "M400 ; finish all queued moves before the wait",
+        "M104 S0 ; schedule wait: nozzle heater off",
+        "M140 S0 ; schedule wait: bed heater off",
+        "M106 S0 ; schedule wait: part cooling fan off",
+    ]
+    if bambu:
+        lines += [
+            "M106 P2 S0 ; schedule wait: aux fan off",
+            "M106 P3 S0 ; schedule wait: chamber fan off",
+        ]
+    lines += _dwell_lines(wait_s, "schedule wait")
+    lines.append("; ===== plateloop schedule: wait end =====")
+    return "\n".join(lines) + "\n"
+
+
 def build_ejection_snippet(
     max_z_height: float,
     t_lift: float = 5.0,
@@ -572,6 +609,7 @@ def build_multi_plate_sequence(
     printer: dict | None = None,
     plate_objects: dict | None = None,
     plate_max_z: dict | None = None,
+    job_waits: dict | None = None,
 ) -> tuple:
     """Merge several plate gcodes into ONE sequential print job.
 
@@ -587,6 +625,10 @@ def build_multi_plate_sequence(
     plate_prints:  {plate_index: total_prints}
     plate_objects: {plate_index: parse_object_bboxes() result}
     plate_max_z:   {plate_index: max_z_height} (parsed from gcode when absent)
+    job_waits:     {job_no (1-based): schedule_pause_block() text} - idle wait
+                   right before that print (print-window schedule). Job 1's
+                   wait runs before the start gcode; later waits run after the
+                   previous job's ejection, before the re-heat.
     Returns (new_gcode, notes).
     """
     notes = []
@@ -695,9 +737,15 @@ def build_multi_plate_sequence(
                     f"(plate {idx}, print {c + 1} of {n}) =====\n"
                 )
                 parts.append(info["reheat"])
-            parts.append("".join(info["body_first"] if first_job else info["body_rest"]))
+            body = list(info["body_first"] if first_job else info["body_rest"])
+            if first_job and (job_waits or {}).get(1):
+                at = 1 if body and body[0].strip() == EXEC_START else 0
+                body.insert(at, job_waits[1])
+            parts.append("".join(body))
             if eject_enabled:
                 parts.append(info["ejection"])
+                if not last_job and (job_waits or {}).get(job_no + 1):
+                    parts.append(job_waits[job_no + 1])
                 if not last_job:
                     if info["has_markers"]:
                         parts.append(EXEC_END + "\n")  # balance START/END per job

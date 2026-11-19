@@ -12,7 +12,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
 
-from .gcode import build_multi_plate_sequence, ejection_keyframes, parse_max_z_height
+from . import schedule as sched
+from .gcode import (
+    build_multi_plate_sequence,
+    ejection_keyframes,
+    parse_max_z_height,
+    schedule_pause_block,
+)
 from .gcode_bbox import (
     bbox_from_gcode,
     find_push_lane_conflicts,
@@ -533,6 +539,60 @@ def _job_durations(info, active: dict, plate_objects: dict, cool_time_s: int, sa
     return out
 
 
+def _parse_schedule(start: str, window_from: str, window_to: str) -> tuple:
+    """(start_s, Window) from HH:MM strings, 422 on bad input."""
+    try:
+        start_s = sched.parse_hhmm(start)
+        window = sched.Window(sched.parse_hhmm(window_from), sched.parse_hhmm(window_to))
+    except ValueError as e:
+        raise HTTPException(422, f"schedule: {e}") from None
+    return start_s, window
+
+
+def _plan(durations: list[int], start_s: int, window) -> dict:
+    try:
+        return sched.plan(durations, start_s, window)
+    except ValueError as e:
+        raise HTTPException(422, f"schedule: {e}") from None
+
+
+@app.get("/api/schedule")
+async def api_schedule(
+    jobs: str,
+    start: str = "20:00",
+    window_from: str = "20:00",
+    window_to: str = "07:00",
+):
+    """Plan copies into a daily print window (preview for the UI).
+
+    jobs: comma-separated wall time of every copy in seconds, in build order.
+    Times in the answer are seconds after the planned start; `day` counts
+    calendar days from the start day (0 = the start day).
+    """
+    try:
+        durations = [int(x) for x in jobs.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(422, "jobs must be comma-separated integers") from None
+    if not durations or len(durations) > 2000 or any(d < 0 or d > 7 * sched.DAY_S for d in durations):
+        raise HTTPException(422, "jobs: 1..2000 durations of 0..604800 s each")
+    start_s, window = _parse_schedule(start, window_from, window_to)
+    p = _plan(durations, start_s, window)
+
+    def clock(t: int) -> dict:
+        return {"day": (start_s + t) // sched.DAY_S, "time": sched.fmt_hhmm(start_s + t)}
+
+    return {
+        "total_s": p["total_s"],
+        "finish": clock(p["total_s"]),
+        "waiting_s": sum(j["wait_s"] for j in p["jobs"]),
+        "jobs": [{**j, "start": clock(j["start_s"]), "end": clock(j["end_s"])} for j in p["jobs"]],
+        "sessions": [
+            {**s_, "start": clock(s_["start_s"]), "end": clock(s_["end_s"])}
+            for s_ in sched.sessions(p["jobs"])
+        ],
+    }
+
+
 @app.post("/api/sequence")
 async def api_sequence(
     file: UploadFile = File(...),
@@ -544,11 +604,21 @@ async def api_sequence(
     # 0 = wait for cool_temp_bed (M190); >0 = timed cooldown in seconds
     cool_time_s: int = Form(2700, ge=0, le=3600),
     min_height_mm: float = Form(7.0, ge=0, le=100),
+    # print-window schedule; empty schedule_start = print right away
+    schedule_start: str = Form(""),
+    window_from: str = Form("20:00"),
+    window_to: str = Form("07:00"),
 ):
     """Build ONE gcode that runs all selected plates sequentially.
 
     plate_prints: JSON {"1": 10, "2": 5} = TOTAL prints per plate (0 = skip).
+    schedule_start: HH:MM the user will press print. When set, copies only
+    start inside the daily window [window_from, window_to); the printer waits
+    (heaters and fans off) in between.
     """
+    scheduled = bool(schedule_start.strip())
+    if scheduled:
+        start_s, window = _parse_schedule(schedule_start, window_from, window_to)
     info, data, gcodes = await load_gcode_3mf(file)
 
     # ----- selection: total prints per plate -----
@@ -626,6 +696,20 @@ async def api_sequence(
                     f"{min_height_mm}mm (risk of toolhead jam). Slice a taller object or lower the check.",
                 )
 
+    durations = _job_durations(info, active, plate_objects, cool_time_s, safety_wait_s)
+    job_waits: dict = {}
+    total_prediction = float(sum(durations))
+    if scheduled:
+        plan = _plan(durations, start_s, window)
+        total_prediction = float(plan["total_s"])
+        bambu = true_printer.get("vendor") == "bambu"
+        for no, j in enumerate(plan["jobs"], 1):
+            if j["wait_s"] > 0:
+                job_waits[no] = schedule_pause_block(
+                    j["wait_s"], no, len(durations),
+                    resume_at=sched.fmt_hhmm(start_s + j["start_s"]), bambu=bambu,
+                )
+
     new_gcode, _notes = await run_in_threadpool(
         build_multi_plate_sequence,
         gcodes,
@@ -640,6 +724,7 @@ async def api_sequence(
         printer=true_printer,
         plate_objects=plate_objects,
         plate_max_z=plate_max_z,
+        job_waits=job_waits,
     )
 
     # slice_info totals of the remaining plate: printed weight/time of ALL jobs
@@ -657,9 +742,6 @@ async def api_sequence(
             entry["used_g"] += (f.get("weight_g", 0) or 0) * n
             entry["used_m"] += (f.get("used_m", 0) or 0) * n
 
-    # wall time incl. ejection and re-heat, shown by Bambu Studio / Handy
-    total_prediction = float(sum(_job_durations(info, active, plate_objects, cool_time_s, safety_wait_s)))
-
     keep_plate = min(active)
     out_buf = await run_in_threadpool(
         repack_single_plate_3mf,
@@ -671,7 +753,9 @@ async def api_sequence(
     payload = out_buf.getvalue()
 
     stem = Path(file.filename or "model.gcode.3mf").stem
-    out_name = f"{stem}_x{total_prints}.gcode.3mf"
+    # the file only works when started at the planned time: say so in the name
+    when = f"_start-{sched.fmt_hhmm(start_s).replace(':', '')}" if scheduled else ""
+    out_name = f"{stem}_x{total_prints}{when}.gcode.3mf"
     quoted = urllib.parse.quote(out_name)
     return Response(
         content=payload,
