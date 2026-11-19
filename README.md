@@ -52,6 +52,8 @@ those models are honest about being *needs a test print*.
 - **Safety guards.** Minimum part height (measured per object from the
   gcode), cooldown + safety wait, cooling checks and push-lane collision
   warnings before anything is built.
+- **Cooling curve.** An estimated bed cooling curve shows whether the
+  cooldown reaches the ejection temperature before the push.
 - **Local and private.** No account, no cloud, no telemetry. Uploads are
   processed in memory and nothing is written to disk.
 
@@ -179,6 +181,17 @@ single-plate `.gcode.3mf` whose gcode runs the plates back to back:
 | Ejection bed temp | `30 °C` | Temperature to wait for (temperature mode). In fixed-time mode the bed target is lowered to it so the heater stays off. |
 | Safety wait | `60 s` | Extra dwell after the cooldown, before the push. |
 | Min height check | `7 mm` | Rejects plates whose lowest part is too short for a clean push. Heights are measured per object from the gcode. `0` disables the check. |
+| Bed temp at print end / room temp | `50 °C` / `20 °C` | Inputs for the cooling curve only; they do not change the gcode. |
+
+**Cooling curve.** Under *Safety* the app draws the expected bed temperature
+after the print: Newton cooling `T(t) = Ta + (T0 − Ta) · e^(−k·t)` with
+`k ≈ 0.052 /min`, fitted to a measured run on a Bambu Lab A1 in a ~20 °C room
+(a vase still stuck at 31 °C after 24.5 min, started to lift at 30 °C after
+27 min and pushed off easily at 28 °C after 34 min). The green zone is at or
+below the ejection temperature; the marker shows the predicted temperature at
+the push. It warns when the cooldown is too short. Enclosures, other plates
+and warm rooms cool slower — treat the curve as a guide and watch the first
+cycle.
 
 The download is named after your file, e.g. `model_x12.gcode.3mf` for 12
 total prints. The total time shown in the app is an estimate: the slicer's
@@ -342,7 +355,8 @@ python -m ruff check app tests     # lint
 | `app/main.py` | FastAPI routes, upload limits, request validation, allow-listed static assets |
 | `app/middleware.py` | Rate limits, build cap, security headers |
 | `app/legal.py`, `app/site.py` | Legal pages from `.env`, support-link defaults |
-| `app/gcode.py` | Ejection sequence, animation keyframes, multi-plate merge |
+| `app/gcode.py` | Ejection sequence, schedule waits, animation keyframes, multi-plate merge |
+| `app/schedule.py` | Wall-time estimate per copy, print-window planning |
 | `app/gcode_bbox.py` | Object bounding boxes, push-lane conflicts, print-end position |
 | `app/threemf.py` | 3MF parsing, statistics, thumbnails, single-plate repack |
 | `app/printer_db.py` | Printer database loader and model resolution |
@@ -351,7 +365,7 @@ python -m ruff check app tests     # lint
 | `app/static/about.html` | Public “How it works” page |
 | `app/static/assets/` | Shared stylesheet (`base.css`), logo, favicons, self-hosted fonts |
 | `app/static/legal/` | Impressum, Datenschutz and English translations |
-| `tests/` | API and pipeline tests, including animation/gcode parity |
+| `tests/` | API, pipeline and schedule tests, including animation/gcode parity |
 
 Ejection changes must keep `test_keyframes_mirror_gcode` green: the preview and
 the generated gcode are validated against each other. To add a printer, extend
@@ -380,6 +394,16 @@ jam. Rearrange the plate, or watch the first cycle closely.
 **“Preview unavailable for this plate.”**
 The plate has no extrusion moves the app can read, so it cannot place the
 objects. The build itself still works; watch the first cycle closely.
+
+**The print window is off by some time.**
+The printer has no clock: every wait counts from the moment you pressed
+print. Start the file at the time it was built for (it is in the file name,
+`…_start-2000.gcode.3mf`). Slicer time estimates also drift a little per copy;
+over several nights the starts can move by a few minutes.
+
+**The printer never pauses at the end of the window.**
+A copy only *starts* inside the window and may run past its end, by design.
+The wait comes after that copy has been pushed off.
 
 **A setting is outlined in red.**
 The value is outside the allowed range shown below the field. Building is

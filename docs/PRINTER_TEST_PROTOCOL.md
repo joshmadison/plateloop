@@ -46,7 +46,8 @@ judge whether a failed push was caused by the geometry or the sequence.
    - prints per plate: `3`
    - push height: `0.4 mm`
    - lift height: `5 mm`
-   - ejection bed temp: `45 °C`
+   - cooldown: `Fixed time`, `45 min` (the default)
+   - ejection bed temp: `30 °C`
    - safety wait: `60 s`
    - minimum height: `7 mm`
 5. Build the sequence and download the generated `.gcode.3mf`.
@@ -80,7 +81,37 @@ judge whether a failed push was caused by the geometry or the sequence.
 You do not need to set up a camera or edit a video. A few sentences describing
 the cycle are enough to start.
 
-## 6. Submit the report
+## 6. Timing checks
+
+PlateLoop splits every wait into `G4` lines of at most 90 s, because Bambu
+firmware is reported to cap a single `G4` at 90 s. Nobody has published a
+long-run measurement yet, so two quick checks help a lot. Both are optional
+for a printer report, but please run them once on a Bambu Lab printer before
+relying on the print window.
+
+**Cooldown time.** During the first cycle, note the time when the print ends
+and when the push starts. With `45 min` cooldown and `60 s` safety wait the
+gap should be about 46 minutes (plus a few seconds of moves). If it is only a
+few minutes, the dwell chain is being skipped — report it.
+
+**Print window.** Slice a small part (about 10 min), set prints per plate to
+`2`, set the cooldown to `1 min` for this test only, and under **Schedule**
+choose *Only in a time window*:
+
+- *You start the print at*: when you will press print, e.g. `18:00`
+- *Print from*: 25 min later, e.g. `18:25`
+- *Print until*: 10 min after the start, e.g. `18:10`
+
+That window is only closed from 18:10 to 18:25. The plan in the app should
+show copy 1 at 18:00 and copy 2 at 18:25. Press print at 18:00 and check:
+
+- copy 1 prints and is pushed off as usual,
+- the printer then waits with heaters and fans off (note what is still
+  audible),
+- it re-heats and starts copy 2 at about 18:25 (±1–2 min),
+- copy 2 prints normally (no layer shift, the first layer sticks).
+
+## 7. Submit the report
 
 Open a **Printer verification report**:
 
@@ -98,7 +129,7 @@ Include only what you know:
 Do not include serial numbers, addresses, or private data. Blur the background
 if necessary.
 
-## 7. What counts as verified
+## 8. What counts as verified
 
 A model is marked **verified** when a maintainer has reviewed a report showing:
 
@@ -119,7 +150,7 @@ A model stays **needs-test** when there is no complete physical evidence.
 One print or a manually edited file is usually not enough for `verified`, but a
 partial or failed report is still useful. It helps document the model's limits.
 
-## 8. Updating the database
+## 9. Updating the database
 
 When a report is accepted, maintainers update `app/printers.json` with:
 
@@ -135,7 +166,7 @@ When a report is accepted, maintainers update `app/printers.json` with:
 add fields that are supported by the report. Do not silently turn an `expected`
 model into `verified`.
 
-## 9. Privacy
+## 10. Privacy
 
 PlateLoop does not need your printer serial number, account credentials, or
 remote access. Reports are public GitHub issues. Only submit what you are
