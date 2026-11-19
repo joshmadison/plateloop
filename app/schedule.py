@@ -22,10 +22,15 @@ PUSH_MOVES_S = 20        # per object: move over, push, re-park
 REHEAT_S = 180           # bed + nozzle back to print temperature (later copies)
 TEMP_MODE_COOL_S = 900   # per object when cooling "until temperature" (M190)
 
-# Safety margin against drift: the slicer estimate is never exact, and the
-# error adds up copy after copy. A copy is only started when the time left in
-# the print window is larger than this share of the time elapsed so far.
-DEFAULT_MARGIN = 0.05
+# A copy is not started in the last minutes of a window: if the estimate is
+# a little optimistic, it would actually start after the window has closed.
+END_MARGIN_S = 10 * 60
+
+# Slicer estimates are never exact and the error adds up copy after copy
+# (the G4 waits themselves are exact). The plan reports this share of the
+# accumulated print time as a possible drift; it cannot correct it - the
+# printer has no clock to re-sync against.
+DRIFT_SHARE = 0.05
 
 MAX_SCHEDULE_DAYS = 31
 
@@ -84,23 +89,25 @@ def plan(
     durations_s: list[int],
     start_s: int,
     window: Window,
-    margin: float = DEFAULT_MARGIN,
+    end_margin_s: int = END_MARGIN_S,
 ) -> dict:
     """Place copies into the daily print window.
 
-    A copy starts only inside the window and only when the time left in the
-    window exceeds `margin` x the time elapsed so far; it may run past the
-    window's end. Otherwise the printer waits for the next opening.
+    A copy starts only inside the window and not in its last `end_margin_s`;
+    it may run past the window's end. Otherwise the printer waits for the
+    next opening. Every window is filled the same way, however many days in.
 
-    Returns {"jobs": [{"start_s", "end_s", "wait_s"}], "total_s"} with
-    `wait_s` = idle time right before that copy.
+    Returns {"jobs": [{"start_s", "end_s", "wait_s"}], "total_s", "drift_s"}
+    with `wait_s` = idle time right before that copy and `drift_s` = how far
+    the last copy may be off when the estimates are DRIFT_SHARE off.
     """
     t = 0
+    printed = 0
     jobs = []
     for dur in durations_s:
         tod = (start_s + t) % DAY_S
         left = window.until_close(tod)
-        if left > 0 and left > margin * t:
+        if left > end_margin_s:
             wait = 0
         elif left > 0:  # open, but too close to the end: skip to next night
             wait = left + window.until_open((tod + left) % DAY_S)
@@ -108,13 +115,15 @@ def plan(
             wait = window.until_open(tod)
         t += wait
         jobs.append({"start_s": t, "end_s": t + int(dur), "wait_s": wait})
+        drift = int(DRIFT_SHARE * printed)
+        printed += int(dur)
         t += int(dur)
         if t > MAX_SCHEDULE_DAYS * DAY_S:
             raise ValueError(
                 f"the schedule would run longer than {MAX_SCHEDULE_DAYS} days - "
                 "use fewer copies or a longer print window"
             )
-    return {"jobs": jobs, "total_s": t}
+    return {"jobs": jobs, "total_s": t, "drift_s": drift if jobs else 0}
 
 
 def sessions(jobs: list[dict]) -> list[dict]:

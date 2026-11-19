@@ -1420,7 +1420,9 @@ function refreshSchedule(jobs) {
     }).join('');
     $('schedPlan').innerHTML = '<ol>' + rows + '</ol>' +
       '<div class="sum">Done ≈ <b>' + esc(schedClock(base, data.finish)) + '</b> · ' + fmtTime(data.total_s) + ' incl. ' + fmtTime(data.waiting_s) + ' waiting' +
-      ' · estimate, start the file at <b>' + esc(v.start) + '</b></div>';
+      ' · estimate, start the file at <b>' + esc(v.start) + '</b></div>' +
+      (data.drift_s >= 15 * 60 && data.sessions.length > 1
+        ? '<div class="sum">Slicer estimates add up: the last copies may start up to ±' + fmtTime(data.drift_s) + ' off the plan.</div>' : '');
     showScheduledTotal();
   }, 180);
 }

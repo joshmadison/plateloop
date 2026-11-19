@@ -96,18 +96,29 @@ def test_plan_fills_night_then_waits_for_next_evening():
 
 
 def test_plan_copy_may_run_past_window_end():
-    # second copy starts 06:00 (1 h left, margin 5 % of 10 h = 30 min) and
-    # runs to 08:00 although the window closes at 07:00
+    # second copy starts 06:00 (1 h left) and runs to 08:00 although the
+    # window closes at 07:00
     p = schedule.plan([10 * H, 2 * H], 20 * H, _w("20:00", "07:00"))
     assert [j["wait_s"] for j in p["jobs"]] == [0, 0]
 
 
 def test_plan_margin_skips_copy_too_close_to_window_end():
-    # first copy ends 06:36: 24 min left < 5 % of 10.6 h -> wait until 20:00
-    d = int(10.6 * H)
+    # first copy ends 06:55: 5 min left < 10 min margin -> wait until 20:00
+    d = 10 * H + 55 * 60
     p = schedule.plan([d, H], 20 * H, _w("20:00", "07:00"))
     assert p["jobs"][1]["wait_s"] == 24 * H - d
     assert p["jobs"][1]["start_s"] == 24 * H
+
+
+def test_plan_fills_every_night_the_same():
+    # 99 copies of ~39 min, window 20:00-07:00: every full night holds the
+    # same number of copies, also after many days (no growing margin)
+    p = schedule.plan([39 * 60] * 99, 20 * H, _w("20:00", "07:00"))
+    counts = [s["last"] - s["first"] + 1 for s in schedule.sessions(p["jobs"])]
+    assert len(set(counts[:-1])) == 1, counts
+    assert counts[0] == 17
+    # drift hint: 5 % of the print time before the last copy
+    assert p["drift_s"] == int(0.05 * 98 * 39 * 60)
 
 
 def test_plan_delayed_start():

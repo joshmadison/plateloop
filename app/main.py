@@ -585,6 +585,7 @@ async def api_schedule(
         "total_s": p["total_s"],
         "finish": clock(p["total_s"]),
         "waiting_s": sum(j["wait_s"] for j in p["jobs"]),
+        "drift_s": p["drift_s"],
         "jobs": [{**j, "start": clock(j["start_s"]), "end": clock(j["end_s"])} for j in p["jobs"]],
         "sessions": [
             {**s_, "start": clock(s_["start_s"]), "end": clock(s_["end_s"])}

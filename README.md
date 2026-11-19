@@ -236,8 +236,10 @@ How it is built:
   every later copy runs the start sequence again anyway.
 - The plan uses the estimated wall time per copy: slicer print time plus
   cooldown, safety wait and push per object, plus re-heat. Slicer estimates
-  drift, and the drift adds up, so a copy is only started when the time left
-  in the window is larger than 5 % of the time elapsed so far.
+  drift, and the drift adds up over many copies. A copy is not started in the
+  last 10 minutes of a window, and the app shows how far the last copies may
+  be off (5 % of the accumulated print time) — the printer has no clock to
+  correct this, so long runs over many nights get less exact.
 - The app shows which copies run in which window and when the whole run should
   be done. Test the waits once with a short window (e.g. 10 minutes) before
   you rely on it for a multi-day run.
