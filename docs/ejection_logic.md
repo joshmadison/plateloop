@@ -160,3 +160,7 @@ collision-free push path for these arrangements.
   (so the purge never extrudes onto an ejected cold part),
 - re-heat targets the NEXT job's plate temperatures,
 - the native shutdown runs only after the very last job.
+
+---
+
+[← Back to README](../README.md) · [Installation](installation.md) · [Usage](usage.md) · [Configuration](configuration.md) · [Print window](print-window.md) · [Printers](printers.md) · [Safety](safety.md) · [Troubleshooting](troubleshooting.md) · [Development](development.md)

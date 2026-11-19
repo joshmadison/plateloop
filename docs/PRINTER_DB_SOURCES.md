@@ -235,3 +235,7 @@ orca-slicer --slice --export-3mf /tmp/out.gcode.3mf --load-settings machine.json
 | 2026-10-01 | 3 | full re-fetch & verification against BambuStudio master; added `printable.z`; corrected values (park Y, exclusions, P2S radius, X2D/H2 body height, rod distances) |
 | 2026-10-01 | 4 | schema restructure: grouped `machine` / `kinematics` / `toolhead`; top-level label maps; machine-readable park provenance; footprint `estimated` |
 | 2026-10-21 | 5 | multi-vendor: 31 models for Prusa, Creality, Elegoo, Anycubic, QIDI, Sovol and Voron from OrcaSlicer `2457173`; top-level `vendors` (label/prefix/order) and `printer.vendor`; new `no_park` provenance; `toolhead.estimated`; model-id + full-name aliases; Printers page grouped by vendor with filter and remembered state |
+
+---
+
+[← Back to README](../README.md) · [Installation](installation.md) · [Usage](usage.md) · [Configuration](configuration.md) · [Print window](print-window.md) · [Printers](printers.md) · [Safety](safety.md) · [Troubleshooting](troubleshooting.md) · [Development](development.md)

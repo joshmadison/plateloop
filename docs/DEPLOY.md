@@ -360,3 +360,7 @@ uvicorn workers would multiply the effective limits and split the counters.
 For this workload one worker with a thread pool is enough; scale vertically
 (more CPU/RAM) before adding workers. If you ever need multiple workers, move
 the limits to Redis or the proxy.
+
+---
+
+[← Back to README](../README.md) · [Installation](installation.md) · [Usage](usage.md) · [Configuration](configuration.md) · [Print window](print-window.md) · [Printers](printers.md) · [Safety](safety.md) · [Troubleshooting](troubleshooting.md) · [Development](development.md)

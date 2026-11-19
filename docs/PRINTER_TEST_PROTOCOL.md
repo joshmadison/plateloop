@@ -172,3 +172,7 @@ PlateLoop does not need your printer serial number, account credentials, or
 remote access. Reports are public GitHub issues. Only submit what you are
 comfortable publishing, and credit yourself with a handle or leave the credit
 field empty.
+
+---
+
+[← Back to README](../README.md) · [Installation](installation.md) · [Usage](usage.md) · [Configuration](configuration.md) · [Print window](print-window.md) · [Printers](printers.md) · [Safety](safety.md) · [Troubleshooting](troubleshooting.md) · [Development](development.md)
