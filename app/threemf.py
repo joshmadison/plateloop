@@ -583,12 +583,17 @@ def parse_3mf(fileobj: io.BufferedIOBase, filename: str) -> ThreeMFInfo:
     return info
 
 
-def extract_plate_gcodes(fileobj: io.BufferedIOBase, max_uncompressed_mb: int = 400) -> dict:
+def extract_plate_gcodes(fileobj: io.BufferedIOBase, max_uncompressed_mb: int | None = None) -> dict:
     """Extract ALL plate gcodes from a .gcode.3mf, keyed by 1-based plate index.
 
-    Total uncompressed size is capped (zip-bomb guard); members without a
-    'plate_N' in the name are numbered after the existing indices.
+    Total uncompressed size is capped (zip-bomb guard, MAX_3MF_UNCOMPRESSED_MB
+    unless given explicitly); members without a 'plate_N' in the name are
+    numbered after the existing indices.
     """
+    if max_uncompressed_mb is None:
+        max_uncompressed_mb = _limit_from_env(
+            "MAX_3MF_UNCOMPRESSED_MB", DEFAULT_MAX_UNCOMPRESSED_MB
+        )
     cap = max_uncompressed_mb * 1024 * 1024
     out: dict = {}
     with zipfile.ZipFile(fileobj) as zf:
