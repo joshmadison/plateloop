@@ -355,6 +355,44 @@ fieldset.group legend {
   background: rgba(0, 0, 0, .4);
   box-shadow: var(--focus-ring), 0 1px 2px rgba(0, 0, 0, .45) inset;
 }
+/* time inputs share the number-field look */
+.field input[type=time] {
+  width: 100%;
+  height: 2.7rem;
+  padding: 0 .8rem;
+  background: rgba(0, 0, 0, .3);
+  color: var(--text-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-1);
+  font-family: var(--font-mono);
+  font-size: .92rem;
+  color-scheme: dark;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .45) inset;
+  transition: border-color .18s var(--ease-out), box-shadow .18s var(--ease-out), background .18s var(--ease-out);
+}
+.field input[type=time]:hover { border-color: rgba(255, 236, 205, .24); }
+.field input[type=time]:invalid,
+.field input[type=time].is-bad { border-color: rgba(var(--danger-rgb), .7); background: rgba(var(--danger-rgb), .06); }
+.field input[type=time]:focus {
+  outline: none;
+  border-color: rgba(var(--accent-rgb), .75);
+  background: rgba(0, 0, 0, .4);
+  box-shadow: var(--focus-ring), 0 1px 2px rgba(0, 0, 0, .45) inset;
+}
+#schedFields[hidden] { display: none; }
+.sched-note { display: block; color: var(--text-3); font-size: .76rem; line-height: 1.45; margin-top: .5rem; }
+.sched-plan { margin-top: var(--space-3); }
+.sched-plan:empty { display: none; }
+.sched-plan ol { list-style: none; margin: 0; padding: 0; display: grid; gap: .35rem; }
+.sched-plan li {
+  display: flex; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap;
+  padding: .45rem .7rem; border: 1px solid var(--line-1); border-radius: var(--radius-1);
+  background: rgba(0, 0, 0, .2); font-size: .82rem;
+}
+.sched-plan li .t { font-family: var(--font-mono); color: var(--text-1); }
+.sched-plan li .n { color: var(--text-3); }
+.sched-plan .sum { margin-top: .5rem; font-size: .8rem; color: var(--text-2); }
+.sched-plan .sum b { font-family: var(--font-mono); color: var(--text-1); font-weight: 600; }
 .field .label { display: block; font-size: .86rem; color: var(--text-2); margin-bottom: .32rem; font-weight: 550; }
 .seg {
   display: inline-flex;
@@ -1057,6 +1095,37 @@ footer.foot {
             <small class="hint-inline">Shortest part that can still be pushed off. 0 turns the check off.<span class="range"> · allowed 0–100 mm</span></small>
           </div>
         </fieldset>
+
+        <fieldset class="group" id="schedGroup">
+          <legend>Schedule</legend>
+          <div class="field">
+            <span class="label" id="schedModeLabel">When should the printer run?</span>
+            <div class="seg" role="radiogroup" aria-labelledby="schedModeLabel" id="schedMode">
+              <button type="button" role="radio" aria-checked="true" data-mode="now">Right away</button>
+              <button type="button" role="radio" aria-checked="false" data-mode="window">Only in a time window</button>
+            </div>
+            <small class="hint-inline" id="schedModeHint">All copies run back to back.</small>
+          </div>
+          <div id="schedFields" hidden>
+            <div class="field">
+              <label for="schedStart" title="The time you will press print on the printer">You start the print at</label>
+              <input type="time" id="schedStart" value="20:00" required>
+              <small class="hint-inline">The printer has no clock: every wait counts from the moment you press print. Start the file at this time.</small>
+            </div>
+            <div class="two">
+              <div class="field">
+                <label for="winFrom" title="Copies may start from this time on">Print from</label>
+                <input type="time" id="winFrom" value="20:00" required>
+              </div>
+              <div class="field">
+                <label for="winTo" title="No new copy starts after this time">Print until</label>
+                <input type="time" id="winTo" value="07:00" required>
+              </div>
+            </div>
+            <small class="sched-note">A copy only starts inside this window and may finish after it. Between windows the parts are already pushed off, heaters and fans are off and the printer waits.</small>
+            <div class="sched-plan" id="schedPlan" aria-live="polite"></div>
+          </div>
+        </fieldset>
       </section>
     </div>
 
@@ -1223,6 +1292,98 @@ function sequenceJobs(plates, prints) {
     for (let i = 0; i < (prints[p.index] || 0); i++) jobs.push({ plate: p.index, sec: jobDurationSec(p, !jobs.length) });
   });
   return jobs;
+}
+// ===== print-window schedule =====
+// 'now' = back to back, 'window' = copies only start inside a daily window.
+// The plan itself comes from GET /api/schedule (same code as the build).
+let schedMode = 'now', schedInfo = null, schedTimer = null, schedTicket = 0;
+function setSchedMode(mode) {
+  schedMode = mode === 'window' ? 'window' : 'now';
+  document.querySelectorAll('#schedMode [data-mode]').forEach(b => {
+    const on = b.dataset.mode === schedMode;
+    b.setAttribute('aria-checked', String(on));
+    b.tabIndex = on ? 0 : -1;
+  });
+  $('schedFields').hidden = schedMode !== 'window';
+  $('schedModeHint').textContent = schedMode === 'window'
+    ? 'The printer only starts copies inside the time window and waits silently in between.'
+    : 'All copies run back to back.';
+}
+function schedValues() {
+  return { start: $('schedStart').value, from: $('winFrom').value, to: $('winTo').value };
+}
+// returns the first bad time field (or null); start == end is not a window
+function schedBadField() {
+  if (schedMode !== 'window') return null;
+  const v = schedValues();
+  $('winTo').classList.toggle('is-bad', !!v.from && v.from === v.to);
+  if (!v.start) return $('schedStart');
+  if (!v.from) return $('winFrom');
+  if (!v.to || v.from === v.to) return $('winTo');
+  return null;
+}
+// Date of the planned start: today, or tomorrow when that time is long past.
+function schedBaseDate(start) {
+  const [h, m] = start.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  if (d.getTime() < Date.now() - 30 * 60 * 1000) d.setDate(d.getDate() + 1);
+  return d;
+}
+function schedClock(base, c) {
+  const d = new Date(base.getTime());
+  d.setDate(d.getDate() + c.day);
+  return d.toLocaleDateString('en-US', { weekday: 'short' }) + ' ' + c.time;
+}
+function refreshSchedule(jobs) {
+  clearTimeout(schedTimer);
+  if (schedMode !== 'window' || !jobs.length || schedBadField()) {
+    schedInfo = null;
+    $('schedPlan').innerHTML = schedMode === 'window' && jobs.length && schedBadField()
+      ? alertBox('err', '<b>Check the times.</b> Start and end of the print window must differ.') : '';
+    showScheduledTotal();
+    return;
+  }
+  const ticket = ++schedTicket;
+  schedTimer = setTimeout(async () => {
+    const v = schedValues();
+    const q = new URLSearchParams({ jobs: jobs.map(j => j.sec).join(','), start: v.start, window_from: v.from, window_to: v.to });
+    let data = null, err = '';
+    try {
+      const r = await fetch('/api/schedule?' + q.toString());
+      const j = await r.json();
+      if (r.ok) data = j; else err = typeof j.detail === 'string' ? j.detail : 'Could not plan this schedule.';
+    } catch (_) { err = 'Could not plan this schedule.'; }
+    if (ticket !== schedTicket) return;
+    schedInfo = data;
+    if (!data) { $('schedPlan').innerHTML = alertBox('err', esc(err)); showScheduledTotal(); return; }
+    const base = schedBaseDate(v.start);
+    const rows = data.sessions.map(function (s) {
+      const prints = s.first === s.last ? 'print ' + s.first : 'prints ' + s.first + '–' + s.last;
+      return '<li><span class="t">' + esc(schedClock(base, s.start)) + ' → ' + esc(schedClock(base, s.end)) + '</span><span class="n">' + prints + '</span></li>';
+    }).join('');
+    $('schedPlan').innerHTML = '<ol>' + rows + '</ol>' +
+      '<div class="sum">Done ≈ <b>' + esc(schedClock(base, data.finish)) + '</b> · ' + fmtTime(data.total_s) + ' incl. ' + fmtTime(data.waiting_s) + ' waiting' +
+      ' · estimate, start the file at <b>' + esc(v.start) + '</b></div>';
+    showScheduledTotal();
+  }, 180);
+}
+// the sequence card shows the wall time incl. waits once a plan is known
+function showScheduledTotal() {
+  const v = $('totalTimeV'), k = $('totalTimeK');
+  if (!v || !k) return;
+  if (schedMode === 'window' && schedInfo) {
+    v.textContent = fmtTime(schedInfo.total_s);
+    k.textContent = 'total incl. waits';
+  } else {
+    v.textContent = fmtTime(Number(v.dataset.net || 0));
+    k.textContent = 'total time';
+  }
+}
+function schedSummary() {
+  if (schedMode !== 'window') return 'right away';
+  const v = schedValues();
+  return 'start ' + v.start + ' · prints ' + v.from + '–' + v.to;
 }
 function coolSummary() {
   if (coolMode === 'temp') return 'cool to ' + $('cooltemp').value + ' °C';
@@ -1492,9 +1653,11 @@ function renderTotals() {
   $('totalGrid').innerHTML =
     '<div class="cell"><div class="v">' + totalPrints + '</div><div class="k">prints total</div></div>' +
     '<div class="cell"><div class="v">' + (Math.round(totalFil)).toLocaleString('en-US') + '<small style="font-size:.7em;color:var(--text-3)"> g</small></div><div class="k">filament total</div></div>' +
-    '<div class="cell" title="Estimate: slicer print time plus cooldown, safety wait, push and re-heat for every copy."><div class="v">' + fmtTime(totalSec) + '</div><div class="k">total time</div></div>' +
+    '<div class="cell" title="Estimate: slicer print time plus cooldown, safety wait, push and re-heat for every copy."><div class="v" id="totalTimeV" data-net="' + totalSec + '">' + fmtTime(totalSec) + '</div><div class="k" id="totalTimeK">total time</div></div>' +
     (plates.length > 1 ? '<div class="cell wide"><div class="v">' + breakdown.join(' · ') + '</div><div class="k">prints per plate</div></div>' : '') +
     (seqFil.length ? '<div class="cell wide"><div class="v" style="display:flex;gap:6px;flex-wrap:wrap">' + _filChips(seqFil) + '</div><div class="k">filament per color</div></div>' : '');
+  showScheduledTotal();
+  refreshSchedule(jobs);
   refreshHeightBadgeInternal();
 }
 
@@ -1506,7 +1669,7 @@ function renderWarnings(warnings) {
 function openConfirm() {
   if (!currentFile) { $('uploadAlert').innerHTML = alertBox('err', '<b>Choose a file first.</b>'); return; }
   if (!stats) { loadStats(); return; }
-  const badField = ['pushz', 'tlift', coolMode === 'time' ? 'cooltime' : 'cooltemp', 'safetywait', 'minheight'].map($).find(el => !el.checkValidity());
+  const badField = ['pushz', 'tlift', coolMode === 'time' ? 'cooltime' : 'cooltemp', 'safetywait', 'minheight'].map($).find(el => !el.checkValidity()) || schedBadField();
   if (badField) {
     badField.focus();
     badField.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1545,13 +1708,17 @@ function openConfirm() {
   if (hotPlates.length) {
     alerts += alertBox('warn', '<b>Ejection temp ≥ first-layer bed temp on plate ' + hotPlates.join(', ') + '.</b> That heats instead of cooling — lower it for a proper release.');
   }
+  if (schedMode === 'window') {
+    alerts += alertBox('info', '<b>Start this file at ' + esc($('schedStart').value) + '.</b> The printer cannot read the time; all waits count from the moment you press print.');
+  }
   $('modalAlerts').innerHTML = alerts;
   $('recap').innerHTML =
     '<div class="row-l"><span class="k">File</span><span class="v">' + esc(currentFile.name) + '</span></div>' +
     '<div class="row-l"><span class="k">Plates</span><span class="v">' + plateList + '</span></div>' +
     '<div class="row-l"><span class="k">Prints</span><span class="v">' + totalPrints + ' total</span></div>' +
     '<div class="row-l"><span class="k">Filament</span><span class="v">~' + (Math.round(totalFil * 10) / 10).toLocaleString('en-US') + ' g' + (_activeTypes(activePlates) ? ' ' + esc(_activeTypes(activePlates)) : '') + '</span></div>' +
-    '<div class="row-l"><span class="k">Total time</span><span class="v">~' + fmtTime(totalSec) + '</span></div>' +
+    '<div class="row-l"><span class="k">Total time</span><span class="v">~' + fmtTime(schedMode === 'window' && schedInfo ? schedInfo.total_s : totalSec) + '</span></div>' +
+    '<div class="row-l"><span class="k">Schedule</span><span class="v">' + esc(schedSummary()) + '</span></div>' +
     '<hr>' +
     '<div class="row-l"><span class="k">Ejection</span><span class="v">ON · ' + esc(coolSummary()) + '</span></div>' +
     '<div class="row-l"><span class="k">Push height / lift height</span><span class="v">' + esc($('pushz').value) + ' / ' + esc($('tlift').value) + ' mm</span></div>' +
@@ -1617,6 +1784,13 @@ function buildSequence() {
   fd.append('cool_time_s', String(coolTimeSeconds()));
   fd.append('safety_wait_s', num($('safetywait'), '60'));
   fd.append('min_height_mm', num($('minheight'), '7'));
+  if (schedMode === 'window') {
+    const v = schedValues();
+    fd.append('schedule_start', v.start);
+    fd.append('window_from', v.from);
+    fd.append('window_to', v.to);
+  }
+  const builtStart = schedMode === 'window' ? $('schedStart').value : '';
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/sequence');
@@ -1665,7 +1839,7 @@ function buildSequence() {
     $('result').innerHTML =
       '<div class="result-ok"><div class="dl">' +
       '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>' +
-      '<div><b style="font-size:.95rem" title="' + esc(fname) + '">' + esc(fname) + '</b><span class="hint">' + (xhr.response.size / 1024 / 1024).toFixed(1) + ' MB · send it to your printer like any other print</span></div></div>' +
+      '<div><b style="font-size:.95rem" title="' + esc(fname) + '">' + esc(fname) + '</b><span class="hint">' + (xhr.response.size / 1024 / 1024).toFixed(1) + ' MB · ' + (builtStart ? 'start it on the printer at <b>' + esc(builtStart) + '</b>' : 'send it to your printer like any other print') + '</span></div></div>' +
       '<a class="btn btn-sm" href="' + url + '" download="' + esc(fname) + '">' +
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/></svg>Download</a></div>';
     $('animEmptyText').textContent = 'Loading ejection preview…';
@@ -1731,6 +1905,30 @@ $('coolMode').addEventListener('keydown', e => {
   $('coolMode').querySelector('[aria-checked="true"]').focus();
 });
 setCoolMode('time');
+
+function onSchedModeChange(mode) {
+  if (mode === schedMode) return;
+  setSchedMode(mode);
+  if (lastBuildName) $('staleNote').classList.add('show');
+  renderTotals();
+}
+$('schedMode').addEventListener('click', e => {
+  const b = e.target.closest('[data-mode]');
+  if (b) onSchedModeChange(b.dataset.mode);
+});
+$('schedMode').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  onSchedModeChange(schedMode === 'now' ? 'window' : 'now');
+  $('schedMode').querySelector('[aria-checked="true"]').focus();
+});
+['schedStart', 'winFrom', 'winTo'].forEach(id => {
+  $(id).addEventListener('change', () => {
+    if (lastBuildName) $('staleNote').classList.add('show');
+    renderTotals();
+  });
+});
+setSchedMode('now');
 
 // copies stepper: −/+ buttons next to each plate's prints input
 $('platesWrap').addEventListener('click', e => {

@@ -47,6 +47,8 @@ those models are honest about being *needs a test print*.
 - **Printer-aware geometry.** 45 models across 8 vendor families (Bambu Lab,
   Prusa, Creality, Elegoo, Anycubic, QIDI, Sovol, Voron) with slicer-derived
   travel limits, park positions and toolhead clearance.
+- **Print window.** Optionally run copies only at set times, e.g. overnight;
+  in between, the printer waits with heaters and fans off.
 - **Safety guards.** Minimum part height (measured per object from the
   gcode), cooldown + safety wait, cooling checks and push-lane collision
   warnings before anything is built.
@@ -189,6 +191,43 @@ cooldown runs once per object on the plate).
 > which can never stall. Use *Until temperature* when you need a guaranteed
 > bed temperature — but in an enclosed printer or a warm room the bed may never
 > get that cool, and the print would wait forever.
+
+## Print window (schedule)
+
+Under **Schedule** you can let the printer run only at certain times, for
+example overnight. Pick *Only in a time window* and set:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| You start the print at | `20:00` | When you will press print on the printer. |
+| Print from / until | `20:00`–`07:00` | Daily window in which copies may **start**. Windows over midnight work. |
+
+A copy only starts inside the window and may finish after it. When the window
+is over, the printer waits after the part has been pushed off: nozzle and bed
+heaters and the fans are switched off, then the file simply waits until the
+next window opens and re-heats for the next copy. It never pauses mid-print,
+so no part cools down on the plate. Starting before the window opens gives a
+delayed start (e.g. press print at 15:00, printing begins at 20:00).
+
+> [!IMPORTANT]
+> The printer has no clock that G-code can read. The schedule is a timetable
+> counted from the moment you press print, so **start the file at the time you
+> entered** — the download is named `…_start-2000.gcode.3mf` as a reminder.
+> Starting 30 minutes late shifts every window by 30 minutes.
+
+How it is built:
+
+- Waits are chains of `G4 S90` (Bambu firmware caps one `G4` at 90 s), after
+  an `M400` and with `M104 S0`, `M140 S0` and `M106 S0` (plus `P2`/`P3` on
+  Bambu printers). The motors stay powered, so the axes do not lose position;
+  every later copy runs the start sequence again anyway.
+- The plan uses the estimated wall time per copy: slicer print time plus
+  cooldown, safety wait and push per object, plus re-heat. Slicer estimates
+  drift, and the drift adds up, so a copy is only started when the time left
+  in the window is larger than 5 % of the time elapsed so far.
+- The app shows which copies run in which window and when the whole run should
+  be done. Test the waits once with a short window (e.g. 10 minutes) before
+  you rely on it for a multi-day run.
 
 ## Public hosting
 

@@ -203,3 +203,10 @@ def test_schedule_preview_endpoint(client):
     assert d["sessions"][1]["start"] == {"day": 1, "time": "20:00"}
     assert d["waiting_s"] == 12 * H
     assert client.get("/api/schedule", params={"jobs": "x"}).status_code == 422
+
+
+def test_index_has_schedule_tile(client):
+    html = client.get("/").text
+    for needle in ('id="schedMode"', 'id="schedStart"', 'id="winFrom"', 'id="winTo"',
+                   "fd.append('schedule_start'", "/api/schedule?"):
+        assert needle in html, needle
