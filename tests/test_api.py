@@ -483,8 +483,8 @@ def _mixed_height_3mf() -> bytes:
         )
         zf.writestr("Metadata/plate_1.json", json.dumps({
             "bbox_objects": [
-                {"area": 1.0, "bbox": [40, 80, 120, 150], "id": 11, "name": "Tall.stl"},
-                {"area": 1.0, "bbox": [180, 220, 40, 90], "id": 22, "name": "Flat.stl"},
+                {"area": 1.0, "bbox": [40, 120, 80, 150], "id": 11, "name": "Tall.stl"},
+                {"area": 1.0, "bbox": [180, 40, 220, 90], "id": 22, "name": "Flat.stl"},
             ],
             "version": 2,
         }))

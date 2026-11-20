@@ -146,9 +146,9 @@ def _make_3mf(height: float = 30.0, with_purge: bool = False) -> bytes:
             '<config><plate><metadata key="gcode_file" value="Metadata/plate_1.gcode"/></plate></config>',
         )
         objects = {
-            "bbox_all": [50, 100, 150, 200],
+            "bbox_all": [50, 150, 100, 200],
             "bbox_objects": [
-                {"area": 1756.13, "bbox": [50, 100, 150, 200], "id": 223, "layer_height": 0.2, "name": "Lenker.stl"}
+                {"area": 1756.13, "bbox": [50, 150, 100, 200], "id": 223, "layer_height": 0.2, "name": "Lenker.stl"}
             ],
             "bed_type": "textured_plate",
             "version": 2,
@@ -1004,3 +1004,22 @@ def test_ejection_turns_hotend_and_fans_off_while_waiting():
     reheat = ls[next(k for k, ln in enumerate(ls) if ln.startswith("; re-heat for next print")):][:5]
     assert "M104 S140 ; nozzle standby (no ooze before cleaning)" in reheat
     assert not any(ln.startswith("M109 S220") for ln in reheat)
+
+
+def test_plate_json_bbox_is_xmin_ymin_xmax_ymax():
+    """Bambu writes bbox_objects as [xmin, ymin, xmax, ymax] (real Benchy
+    plate_1.json from Bambu Studio 02.09) - not [xmin, xmax, ymin, ymax]."""
+    plate_json = {
+        "bbox_all": [120.43747, 111.62346, 136.67176, 150.65659],
+        "bbox_objects": [{"area": 437.26, "bbox": [120.43747, 111.62346, 136.67176, 150.65659],
+                          "id": 390, "layer_height": 0.25, "name": "3DBenchy.stl"}],
+        "bed_type": "textured_plate",
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("Metadata/plate_1.json", json.dumps(plate_json))
+        zf.writestr("Metadata/plate_1.gcode", "; max_z_height: 48.00\nG1 X1 Y1\n")
+    info = parse_3mf(io.BytesIO(buf.getvalue()), "benchy.gcode.3mf")
+    obj = info.plates[0].objects[0]
+    assert (obj.x_min, obj.y_min, obj.x_max, obj.y_max) == (120.44, 111.62, 136.67, 150.66)
+    assert obj.width_mm == 16.23 and obj.depth_mm == 39.03

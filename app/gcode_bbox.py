@@ -1,8 +1,9 @@
 """Compute true 2D bbox from real extrusion moves in the sliced gcode.
 
 Ground truth (verified 2026-09-28 against user's Lenker example):
-- plate_1.json bbox_objects/bbox_all = WRONG for whole-object extent
-  (only covers part of the model: 38.98 x 45.44 vs true 118.59 x 114.50)
+- plate_1.json bbox_objects/bbox_all ([xmin, ymin, xmax, ymax]) only
+  covers the first-layer footprint, not the whole object: overhangs above
+  the first layer (vase, Benchy bow) are missing
 - Real extrusion moves in the gcode are the reliable source
 - STL truth: 119.085 x 114.92 x 30 (Bambu Lab page) - matches gcode extent
   (with extrusion width + skirt margins) perfectly.

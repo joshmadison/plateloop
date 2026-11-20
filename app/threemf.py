@@ -420,10 +420,13 @@ def _parse_gcode_3mf(zf: zipfile.ZipFile, info: ThreeMFInfo) -> None:
                 except (KeyError, TypeError, ValueError):
                     pass
             elif isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                # Bambu 2D bbox: [xmin, xmax, ymin, ymax]
+                # Bambu 2D bbox: [xmin, ymin, xmax, ymax] - the first-layer
+                # footprint (verified against the gcode extent of real
+                # Bambu Studio 02.09 files); the gcode stays the primary
+                # source, this is the fallback
                 try:
-                    x_min, x_max = float(bbox[0]), float(bbox[1])
-                    y_min, y_max = float(bbox[2]), float(bbox[3])
+                    x_min, y_min = float(bbox[0]), float(bbox[1])
+                    x_max, y_max = float(bbox[2]), float(bbox[3])
                     w = round(x_max - x_min, 2)
                     d = round(y_max - y_min, 2)
                 except (TypeError, ValueError):

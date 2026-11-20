@@ -160,13 +160,13 @@ def make_multi_plate_3mf(h1: float = 30.0, h2: float = 54.0) -> bytes:
             '</Relationships>',
         )
         zf.writestr("Metadata/plate_1.json", json.dumps({
-            "bbox_all": [100, 150, 100, 150],
-            "bbox_objects": [{"area": 100.0, "bbox": [100, 150, 100, 150], "id": 11, "name": "Plate1.stl"}],
+            "bbox_all": [100, 100, 150, 150],
+            "bbox_objects": [{"area": 100.0, "bbox": [100, 100, 150, 150], "id": 11, "name": "Plate1.stl"}],
             "version": 2,
         }))
         zf.writestr("Metadata/plate_2.json", json.dumps({
-            "bbox_all": [60, 110, 80, 150],
-            "bbox_objects": [{"area": 100.0, "bbox": [60, 110, 80, 150], "id": 22, "name": "Plate2.stl"}],
+            "bbox_all": [60, 80, 110, 150],
+            "bbox_objects": [{"area": 100.0, "bbox": [60, 80, 110, 150], "id": 22, "name": "Plate2.stl"}],
             "version": 2,
         }))
         zf.writestr("Metadata/plate_1.png", PNG_1PX)
@@ -208,10 +208,10 @@ def make_overlap_3mf() -> bytes:
             '<config><plate><metadata key="gcode_file" value="Metadata/plate_1.gcode"/></plate></config>',
         )
         zf.writestr("Metadata/plate_1.json", json.dumps({
-            "bbox_all": [80, 180, 40, 150],
+            "bbox_all": [80, 40, 180, 150],
             "bbox_objects": [
-                {"area": 1.0, "bbox": [100, 150, 120, 150], "id": 11, "name": "Rear.stl"},
-                {"area": 1.0, "bbox": [120, 180, 40, 90], "id": 22, "name": "Front.stl"},
+                {"area": 1.0, "bbox": [100, 120, 150, 150], "id": 11, "name": "Rear.stl"},
+                {"area": 1.0, "bbox": [120, 40, 180, 90], "id": 22, "name": "Front.stl"},
             ],
             "version": 2,
         }))
@@ -300,9 +300,9 @@ def make_gcode_3mf(height: float = 30.0, depth: float = 45.44, with_purge: bool 
             '<config><plate><metadata key="gcode_file" value="Metadata/plate_1.gcode"/></plate></config>',
         )
         objects = {
-            "bbox_all": [50, 100, 150, 200],
+            "bbox_all": [50, 150, 100, 200],
             "bbox_objects": [
-                {"area": 1756.13, "bbox": [50, 100, 150, 200], "id": 223, "layer_height": 0.2, "name": "Lenker.stl"}
+                {"area": 1756.13, "bbox": [50, 150, 100, 200], "id": 223, "layer_height": 0.2, "name": "Lenker.stl"}
             ],
             "bed_type": "textured_plate",
             "version": 2,
