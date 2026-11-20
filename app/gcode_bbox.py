@@ -145,8 +145,9 @@ def find_push_lane_conflicts(objects: list, toolhead_half_width_mm: float = 18.0
     The ejection pushes the rear-most object first from its y_max down to
     Y=0. The toolhead is centered on that object, so its body sweeps the
     X lane [center - half_width, center + half_width] over the full plate
-    depth: every remaining object whose X band touches that lane is hit -
-    the parts can cascade off together or jam. Uses the same dynamic order
+    depth, and the pushed part itself sweeps its own X span: every remaining
+    object whose X band touches either is hit - the parts can cascade off
+    together or jam. Uses the same dynamic order
     as the generator (rear-most first, tie: closest to X=0).
     Returns [(rear_obj, at_risk_obj), ...].
     """
@@ -156,8 +157,8 @@ def find_push_lane_conflicts(objects: list, toolhead_half_width_mm: float = 18.0
         rear = min(remaining, key=lambda o: (-o["y_max"], (o["x_min"] + o["x_max"]) / 2))
         remaining.remove(rear)
         center = (rear["x_min"] + rear["x_max"]) / 2
-        lane_min = center - toolhead_half_width_mm
-        lane_max = center + toolhead_half_width_mm
+        lane_min = min(rear["x_min"], center - toolhead_half_width_mm)
+        lane_max = max(rear["x_max"], center + toolhead_half_width_mm)
         for other in remaining:
             if other["x_max"] > lane_min and other["x_min"] < lane_max:
                 conflicts.append((rear, other))
@@ -178,7 +179,10 @@ def print_end_position(gcode: str, bed_limit: float = 262.0) -> dict | None:
         s = line.strip()
         if s.startswith(";"):
             continue
-        if s.startswith("M140 S0"):
+        # stop at the machine end gcode (a bed-0 start or layer would also
+        # start with 'M140 S0' - that is not the end of the print)
+        if s == "; MACHINE_END_GCODE_START" or (s.startswith("M140 S0") and last_x is not None
+                                                and "; MACHINE_END_GCODE_START" not in gcode):
             break
         if not (s.startswith("G0 ") or s.startswith("G1 ") or s in ("G0", "G1")):
             continue

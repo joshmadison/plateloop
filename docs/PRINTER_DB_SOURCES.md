@@ -185,7 +185,8 @@ the existing reader applies. However:
 - Bambu G-code contains `; EXECUTABLE_BLOCK_START/END` and
   `; MACHINE_START_GCODE_END`; Prusa/Creality/… Orca output does not.
   `app/gcode.py` then uses its **fallback append mode**: the native shutdown is
-  split at `M140 S0`, and the full start gcode is replayed for every print
+  split at the first `M140 S0` after `; MACHINE_END_GCODE_START` (or after the
+  last layer change), and the full start gcode is replayed for every print
   (no purge-free variant). Expect longer per-copy times.
 - `max_z_height` can be missing from non-Bambu headers; the builder then falls
   back to 20 mm and surfaces a warning. Check the generated file.

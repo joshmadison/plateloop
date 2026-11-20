@@ -184,7 +184,7 @@ def make_multi_plate_3mf(h1: float = 30.0, h2: float = 54.0) -> bytes:
             .replace("; total filament weight [g] : 33.55", "; total filament weight [g] : 42.92")
             .replace("; total filament length [mm] : 11247.87", "; total filament length [mm] : 14320.50")
             .replace("M140 S65", "M140 S60")
-            .replace("M104 S220", "M104 S230")
+            .replace("M104 S220", "M104 S230").replace("M109 S220", "M109 S230")
             .replace("G1 X100 Y100 E1.0 F6000", "; OBJECT_ID: 22\nG1 X60 Y80 E1.0 F6000")
             .replace("G1 X150 Y100 E2.0 F6000", "G1 X110 Y80 E2.0 F6000")
             .replace("G1 X150 Y150 E3.0 F6000", "G1 X110 Y150 E3.0 F6000")

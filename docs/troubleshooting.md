@@ -13,6 +13,13 @@ The app falls back to A1 geometry so it can still build a file. Confirm the
 park positions for your model before printing, or add the model to
 `app/printers.json`.
 
+**“Ejection is not safe: … the X gantry … would hit it”** /
+**“… the toolhead would descend onto it”**
+The ejection cannot clear this plate without a crash. Print the parts on
+separate plates, place them in one push lane (one behind the other), or move
+the part away from the rear edge. See the clearance checks in
+[ejection logic](ejection_logic.md).
+
 **“Objects share the same push lane.”**
 Their X ranges overlap, so the rear object may shove the front one along or
 jam. Rearrange the plate, or watch the first cycle closely.

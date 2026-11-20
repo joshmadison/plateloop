@@ -11,6 +11,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, ".")
 
 from conftest import PNG_1PX, make_multi_plate_3mf, make_project_3mf  # noqa: E402
@@ -229,14 +231,15 @@ def test_ejection_snippet_geometry():
     o_retract = order_of("step 1: retract")
     o_lift = order_of("step 2: lift")
     o_park = order_of("step 3: bed fully forward")
-    o_center = order_of("step 4: toolhead to plate center")
-    o_descend = order_of("step 5: descend")
     o_x = order_of("step 7")
+    o_descend = order_of("step 5: descend")
     o_cool = order_of("step 8: set bed target")
     o_wait = order_of("step 9: safety wait")
     o_push = order_of("step 10")
-    assert 0 < o_retract < o_lift < o_park < o_center < o_descend
-    assert o_descend < o_x < o_cool < o_wait < o_push
+    # X travel happens at safe height, the descend to push_z only above the
+    # object's center (never a sideways move at push_z along the rear edge)
+    assert 0 < o_retract < o_lift < o_park < o_x < o_descend
+    assert o_descend < o_cool < o_wait < o_push
     assert "G28" not in snip, "G28 Z re-home must not be in ejection"
 
 
@@ -287,17 +290,17 @@ def test_ejection_implied_lift_between_objects():
     li = snip.splitlines()
 
     # After first push (step 10), before next object's X-move:
-    # must have lift (11a), repark (11b), descend (11c)
+    # must have lift (11a) and repark (11b); the descend follows the X move
     push1_idx = next(i for i, ln in enumerate(li) if "step 10" in ln and "object 1/2" in ln)
     xcycle2_idx = next(i for i, ln in enumerate(li) if "step 7" in ln and "object 2/2" in ln)
     between = li[push1_idx:xcycle2_idx]
 
     has_lift = any("step 11a: lift" in ln for ln in between)
     has_repark = any("step 11b: bed fully forward" in ln for ln in between)
-    has_descend = any("step 11c: descend" in ln for ln in between)
     assert has_lift, "missing lift between objects (collision!)"
     assert has_repark, "missing repark between objects"
-    assert has_descend, "missing descend between objects"
+    assert not any(ln.startswith("G1 Z0.4") for ln in between), "no descend before the X move"
+    assert li[xcycle2_idx + 1].startswith("G1 Z0.4") and "step 5" in li[xcycle2_idx + 1]
 
     # After last push: lift to safe height FIRST, then final park - the
     # toolhead must never sweep back over the plate at push height (A2).
@@ -391,11 +394,11 @@ def test_keyframes_mirror_gcode():
     # toolhead geometry from printer db
     assert kf["toolhead_dims"]["clearance_radius"] == pr["toolhead"]["clearance_radius"]
     assert kf["toolhead_dims"]["body_height"] == pr["toolhead"]["body_height"]
-    # frames: done, lift, park, center, descend, xcycle1, cool1, wait1,
-    # push1_1, push1_2, push1 (push travel sub-steps), done_all
+    # frames: done, lift, park, xcycle1 (X at safe height), lower1, cool1,
+    # wait1, push1_1, push1_2, push1 (push travel sub-steps), done_all
     frame_ids = [f["id"] for f in kf["frames"]]
-    assert frame_ids == ["done", "lift", "park", "center", "descend",
-                         "xcycle1", "cool1", "wait1",
+    assert frame_ids == ["done", "lift", "park",
+                         "xcycle1", "lower1", "cool1", "wait1",
                          "push1_1", "push1_2", "push1", "done_all"], \
         f"single-object frame ids changed: {frame_ids}"
     # final park happens at safe height (A2: never sweep the plate at push_z)
@@ -423,7 +426,7 @@ def test_keyframes_cascade_pushes_lane_objects():
         return {o["index"]: o for o in fr[fid]["objects"]}
 
     # phase 1: all objects on the plate, none gone
-    for fid in ("done", "lift", "park", "center", "descend"):
+    for fid in ("done", "lift", "park", "xcycle1", "lower1"):
         s = states(fid)
         assert set(s) == {0, 1, 2}, f"{fid}: must carry all objects"
         assert not any(s[i]["gone"] for i in s), f"{fid}: nothing may be gone yet"
@@ -462,20 +465,22 @@ def test_keyframes_multi_object_lift_between():
         printer=pr, objects=objects,
     )
     frame_ids = [f["id"] for f in kf["frames"]]
-    # cycle 1: xcycle1, cool1, wait1, push1, lift1, repark1, descend1
-    # cycle 2: xcycle2, cool2, wait2, push2
+    # cycle 1: xcycle1, lower1, cool1, wait1, push1, lift1, repark1
+    # cycle 2: xcycle2, lower2, cool2, wait2, push2
     # done_all
     assert "lift1" in frame_ids, "lift frame between objects missing"
     assert "repark1" in frame_ids, "repark frame between objects missing"
-    assert "descend1" in frame_ids, "descend frame between objects missing"
+    assert "lower2" in frame_ids, "descend frame of cycle 2 missing"
     # lift frame must be at safe_z
     lift_frame = next(f for f in kf["frames"] if f["id"] == "lift1")
     assert abs(lift_frame["toolhead"]["z"] - kf["safe_z"]) < 0.01
     # repark frame must be at safe_z
     repark_frame = next(f for f in kf["frames"] if f["id"] == "repark1")
     assert abs(repark_frame["toolhead"]["z"] - kf["safe_z"]) < 0.01
-    # descend frame must be at push_z
-    descend_frame = next(f for f in kf["frames"] if f["id"] == "descend1")
+    # X travel of cycle 2 at safe_z, then descend to push_z
+    x2 = next(f for f in kf["frames"] if f["id"] == "xcycle2")
+    assert abs(x2["toolhead"]["z"] - kf["safe_z"]) < 0.01
+    descend_frame = next(f for f in kf["frames"] if f["id"] == "lower2")
     assert abs(descend_frame["toolhead"]["z"] - 0.4) < 0.01
 
 
@@ -1023,3 +1028,142 @@ def test_plate_json_bbox_is_xmin_ymin_xmax_ymax():
     obj = info.plates[0].objects[0]
     assert (obj.x_min, obj.y_min, obj.x_max, obj.y_max) == (120.44, 111.62, 136.67, 150.66)
     assert obj.width_mm == 16.23 and obj.depth_mm == 39.03
+
+
+# ---- ejection safety (review 2026-11-20) ----
+
+def _two(o1, o2):
+    return [{"id": 1, "moves": 10, **o1}, {"id": 2, "moves": 10, **o2}]
+
+
+def test_safe_z_is_capped_at_the_printer_z_limit():
+    """A1 start turns soft endstops off: Z above 256 would hit the hard stop."""
+    from app.gcode import EjectionUnsafe
+
+    pr = get_printer("A1")
+    snip = build_ejection_snippet(max_z_height=250.0, t_lift=10.0, printer=pr)
+    zs = [float(z) for z in re.findall(r"^G1 Z([\d.]+)", snip, re.MULTILINE)]
+    assert max(zs) == 256.0, zs
+    with pytest.raises(EjectionUnsafe):
+        build_ejection_snippet(max_z_height=255.0, t_lift=5.0, printer=pr)
+
+
+def test_x_travel_at_safe_height_and_brush_zone_avoided():
+    """The nozzle never moves sideways at push_z along the rear edge; in the
+    A1 wiper-brush zone it descends in front of the brush."""
+    pr = get_printer("A1")
+    obj = [{"id": 1, "x_min": 25.0, "x_max": 55.0, "y_min": 100.0, "y_max": 150.0, "moves": 10}]
+    li = build_ejection_snippet(max_z_height=30.0, printer=pr, objects=obj).splitlines()
+    x = next(i for i, ln in enumerate(li) if "step 7" in ln)
+    assert li[x].startswith("G1 X40 ")
+    assert li[x + 1].startswith("G1 Y258 ") and "step 4b" in li[x + 1]
+    assert li[x + 2].startswith("G1 Z0.4 ")
+    # no move at push height before the toolhead is above the object
+    assert not any(ln.startswith("G1 Z0.4") for ln in li[:x])
+    # outside the brush zone: descend at the normal park position
+    obj2 = [{"id": 1, "x_min": 110.0, "x_max": 150.0, "y_min": 100.0, "y_max": 150.0, "moves": 10}]
+    li2 = build_ejection_snippet(max_z_height=30.0, printer=pr, objects=obj2).splitlines()
+    assert not any("step 4b" in ln for ln in li2)
+
+
+def test_timed_cooldown_never_heats_the_bed():
+    """Fixed-time mode switches the bed heater off; the (hidden) ejection
+    temperature field must not become a heating target."""
+    snip = build_ejection_snippet(max_z_height=30.0, cool_temp_bed=70, cool_time_s=600)
+    assert "M140 S0 ; step 8: bed heater off while cooling" in snip
+    assert "M140 S70" not in snip and "M190" not in snip
+
+
+def test_clearance_single_object_is_fine():
+    from app.gcode import ejection_clearance_problems
+
+    obj = [{"id": 1, "x_min": 113.3, "x_max": 143.8, "y_min": 95.1, "y_max": 154.5,
+            "z_max": 48.0, "moves": 10}]
+    assert ejection_clearance_problems(obj, get_printer("A1"), 48.0) == []
+
+
+def test_clearance_gantry_hits_part_outside_the_push_path():
+    """Two Benchys side by side: pushing one sweeps the X gantry (25 mm above
+    the nozzle on the A1) over the other one."""
+    from app.gcode import ejection_clearance_problems
+
+    objs = _two({"x_min": 60.0, "x_max": 90.5, "y_min": 95.0, "y_max": 154.5, "z_max": 48.0},
+                {"x_min": 160.0, "x_max": 190.5, "y_min": 95.0, "y_max": 154.5, "z_max": 48.0})
+    probs = ejection_clearance_problems(objs, get_printer("A1"), 48.0)
+    assert any("X gantry" in p for p in probs), probs
+    # flat parts pass under the gantry
+    flat = _two({"x_min": 60.0, "x_max": 90.5, "y_min": 95.0, "y_max": 154.5, "z_max": 15.0},
+                {"x_min": 160.0, "x_max": 190.5, "y_min": 95.0, "y_max": 154.5, "z_max": 15.0})
+    assert ejection_clearance_problems(flat, get_printer("A1"), 15.0) == []
+
+
+def test_clearance_rear_gap_too_small():
+    """rutsche1 plate 3: part reaches to Y 254.7 - the toolhead would descend
+    onto it at the park position Y 262.5."""
+    from app.gcode import ejection_clearance_problems
+
+    objs = _two({"x_min": 51.5, "x_max": 251.0, "y_min": 160.0, "y_max": 254.73, "z_max": 250.0},
+                {"x_min": 4.9, "x_max": 96.0, "y_min": 1.2, "y_max": 92.4, "z_max": 200.0})
+    probs = ejection_clearance_problems(objs, get_printer("A1"), 250.0)
+    assert any("descend onto it" in p for p in probs), probs
+
+
+def test_push_lane_conflict_uses_the_pushed_parts_width():
+    """A wide rear part shoves a front part that is outside the toolhead lane
+    but inside the part's own X span (rutsche1 plate 3)."""
+    from app.gcode_bbox import find_push_lane_conflicts
+
+    objs = _two({"x_min": 51.5, "x_max": 251.0, "y_min": 160.0, "y_max": 250.0},
+                {"x_min": 4.9, "x_max": 96.0, "y_min": 1.2, "y_max": 92.4})
+    assert len(find_push_lane_conflicts(objs, 18.0)) == 1
+
+
+def test_nozzle_temp_without_prepare_comment():
+    """The print temperature must not depend on the '; prepare to print'
+    comment - without it copy 2 used to start at the 140 C probe temp."""
+    gc = _a1_gcode().replace("M104 S220 ; prepare to print", "M104 S220")
+    assert parse_print_temps(gc) == (65, 220)
+    new_gc, _ = build_multi_plate_sequence({1: gc}, {1: 2}, cool_time_s=300,
+                                           min_height_mm=0, plate_max_z={1: 30.0})
+    temps = [ln.strip() for ln in _job_start(new_gc, 2) if re.match(r"\s*M10[49] S\d+", ln)]
+    assert temps[-1].startswith("M109 S220"), temps[-3:]
+
+
+def test_nozzle_temp_from_slicer_config():
+    gc = "; nozzle_temperature_initial_layer = 235,250\nM104 S140\nM140 S60\n"
+    assert parse_print_temps(gc) == (60, 235)
+
+
+def test_unknown_nozzle_temp_refuses_to_build():
+    from app.gcode import EjectionUnsafe
+
+    gc = _a1_gcode().replace("M104 S220 ; prepare to print", "")
+    gc = re.sub(r"^M10([49]) S220.*$", r"M10\1 S140", gc, flags=re.MULTILINE)
+    with pytest.raises(EjectionUnsafe):
+        build_multi_plate_sequence({1: gc}, {1: 2}, min_height_mm=0, plate_max_z={1: 30.0})
+
+
+def test_parse_print_temps_no_quadratic_backtracking():
+    import time
+
+    gc = "M104 S1" + " " * 200_000 + "x\n"
+    t0 = time.perf_counter()
+    parse_print_temps(gc)
+    assert time.perf_counter() - t0 < 0.5
+
+
+def test_bed_temp_zero_does_not_split_the_print():
+    """'M140 S0' in the START gcode (bed temp 0) is not the native shutdown:
+    every copy must still contain the whole print."""
+    gc = _a1_gcode()
+    gc = gc.replace("M140 S65", "M140 S0").replace("M190 S65", "M190 S0")
+    gc = gc.replace("M140 S0 ; turn off bed", "; MACHINE_END_GCODE_START\nM140 S0 ; turn off bed")
+    new_gc, _ = build_multi_plate_sequence({1: gc}, {1: 3}, cool_time_s=300,
+                                           min_height_mm=0, plate_max_z={1: 30.0})
+    ls = new_gc.splitlines()
+    assert sum(1 for ln in ls if ln.startswith("; CHANGE_LAYER")) == 3
+    assert sum(1 for ln in ls if ln.startswith("M140 S0 ; turn off bed")) == 1
+    # the first ejection comes after the first print, not right after the start
+    first_eject = next(i for i, ln in enumerate(ls) if "auto-ejection (generated)" in ln)
+    first_layer = next(i for i, ln in enumerate(ls) if ln.startswith("; CHANGE_LAYER"))
+    assert first_layer < first_eject

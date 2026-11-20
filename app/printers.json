@@ -123,12 +123,21 @@
       "kinematics": {
         "rear_command_limit": 262.5,
         "rear_command_limit_source": "verified_gcode",
-        "front_lip_y": 0.0
+        "front_lip_y": 0.0,
+        "park_avoid": [
+          {
+            "x_min": 10.0,
+            "x_max": 75.0,
+            "y": 258.0,
+            "reason": "nozzle wiper brush at Y 260-262.5, X 20-65 (A1 start gcode wipes there at Z1.3)"
+          }
+        ]
       },
       "toolhead": {
         "body_height": 4.76,
         "clearance_radius": 73.0,
         "dist_to_rod": 56.5,
+        "height_to_rod": 25.0,
         "footprint": {
           "width": 36.0,
           "depth": 28.0,

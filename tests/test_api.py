@@ -73,19 +73,23 @@ def _sequence_gcode(client, data_3mf, **form) -> str:
 
 
 def test_cooldown_defaults_to_timed_45_min(client, tall_3mf):
-    # Default: lower the bed target to 30 °C and wait a fixed 45 minutes.
-    # Never M190 for the ejection, so an enclosed printer cannot hang.
+    # Default: bed heater off and wait a fixed 45 minutes. Never M190 for
+    # the ejection, so an enclosed printer cannot hang, and never a target
+    # that could heat (the hidden ejection-temp field is ignored here).
     gc = _sequence_gcode(client, tall_3mf)
     eject = gc.split("; ===== Phase 2")[1]
-    assert "M140 S30 ; step 8" in eject
+    assert "M140 S0 ; step 8: bed heater off while cooling" in eject
+    assert "M190" not in eject.split("; ===== end auto-ejection")[0]
     # 2700 s -> 30 chained G4 S90 lines (Bambu caps one G4 at 90 s)
     cool = [ln for ln in eject.splitlines() if "step 8: cool down for 45 min" in ln]
     assert len(cool) == 30
     assert cool[0] == "G4 S90 ; step 8: cool down for 45 min (1/30)"
     assert cool[-1] == "G4 S90 ; step 8: cool down for 45 min (30/30)"
     assert "M190 S30" not in gc
-    # 'M140 S0' stays reserved for the single native shutdown
-    assert sum(1 for ln in gc.splitlines() if ln.strip().startswith("M140 S0")) == 1
+    # the native shutdown runs once; the shutdown is found via the machine end
+    # gcode marker, so the ejection may switch the bed heater off itself
+    assert sum(1 for ln in gc.splitlines()
+               if ln.strip().startswith("M140 S0") and "step 8" not in ln) == 1
 
 
 def test_cooldown_can_wait_for_temperature(client, tall_3mf):
@@ -386,7 +390,8 @@ def test_sequence_multi_plate(client, multi_3mf):
     ls = gc.splitlines()
     assert sum(1 for ln in ls if ln.strip() == "; EXECUTABLE_BLOCK_START") == 3
     assert sum(1 for ln in ls if ln.strip() == "; EXECUTABLE_BLOCK_END") == 3
-    assert sum(1 for ln in ls if ln.strip().startswith("M140 S0")) == 1
+    # native shutdown exactly once (the ejection's 'M140 S0 ; step 8' is not it)
+    assert sum(1 for ln in ls if ln.strip().startswith("M140 S0") and "step 8" not in ln) == 1
     assert gc.count("G0 X128 E10") == 1  # purge strip once
     assert gc.count("auto-ejection (generated)") == 3
     assert "safe_z=35" in gc and "safe_z=59" in gc
@@ -525,3 +530,14 @@ def test_non_finite_prints_are_rejected(client, tall_3mf):
         data={"plate_prints": '{"1": Infinity}'},
     )
     assert r.status_code == 422
+
+
+def test_temperature_cooldown_above_print_bed_temp_is_refused(client, tall_3mf):
+    """Waiting for an ejection temp >= the print bed temp would heat the bed."""
+    r = client.post(
+        "/api/sequence",
+        files={"file": ("m.gcode.3mf", tall_3mf, "application/octet-stream")},
+        data={"plate_prints": '{"1": 2}', "cool_time_s": "0", "cool_temp_bed": "70"},
+    )
+    assert r.status_code == 422
+    assert "heat instead of cool" in r.json()["detail"]

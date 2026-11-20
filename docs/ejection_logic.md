@@ -97,11 +97,9 @@ starts at `rear_command_limit = printable.y` instead.
 | Step | Action | Parameter |
 |---|---|---|
 | 1 | **Print done** - last gcode move finished, retract filament | `E-6` (fixed) |
-| 2 | **Lift the toolhead** to `safe_z` | `safe_z = max_z_height + t_lift` |
+| 2 | **Lift the toolhead** to `safe_z` | `safe_z = max_z_height + t_lift`, capped at the printer's Z limit (`printable.z`). The A1 start gcode turns the soft endstops off, so a higher Z would drive into the hard stop. A part closer than 2 mm to the Z limit is refused. |
 | 2b | **Hotend and fans off** while the part cools: a nozzle idling hot over the plate oozes and burns PLA onto the tip, and the A1 probes the bed with that tip before the next print | `M104 S0`, `M106 S0` (+ `P2`/`P3` on Bambu) |
 | 3 | **Bed fully forward** - Y to `rear_limit` (pusher behind the plate) | `rear_limit` |
-| 4 | **Toolhead X to plate center** | `plate_center_x` |
-| 5 | **Descend the toolhead** to `push_z` (pusher at min gap above the plate) | `push_z` |
 
 ### Phase 2 - object selection + ejection (repeat until the plate is empty)
 
@@ -109,8 +107,10 @@ starts at `rear_command_limit = printable.y` instead.
 |---|---|---|
 | 6 | **Find the next object** | The part whose bounding box edge is closest to the toolhead in Y (at `Y = rear_limit` = the rear-most object). |
 | 6.1 | *Tie-breaker* | On equal distance - the part whose bbox center is **closest to X = 0**. |
-| 7 | **Toolhead X position** | X to the bbox center of the chosen part. |
-| 8 | **Cool down** | Fixed time: `M140 S<cool_temp_bed>` + `G4 S<cool_time_s>`, split into lines of at most 90 s (Bambu firmware caps a single `G4` at 90 s). Temperature mode: `M140` + `M190` wait for `cool_temp_bed`. G-code has no "wait for temperature with a timeout". |
+| 7 | **Toolhead X position** | X to the bbox center of the chosen part, **at `safe_z`**. The nozzle never moves sideways at `push_z` along the rear edge (the A1 wiper brush sits there). |
+| 4b | **Park-avoid zone** | If the X position lies in a `park_avoid` zone of the printer (A1: wiper brush, X 10–75), Y moves in front of it (A1: `Y 258`) before descending. |
+| 5 | **Descend the toolhead** to `push_z` (pusher at min gap above the plate) | `push_z` |
+| 8 | **Cool down** | Fixed time: bed heater off (`M140 S0`) + `G4 S<cool_time_s>`, split into lines of at most 90 s (Bambu firmware caps a single `G4` at 90 s). Temperature mode: `M140` + `M190` wait for `cool_temp_bed`. G-code has no "wait for temperature with a timeout". |
 | 9 | **Safety wait** | Wait `safety_wait_s` (`G4`, split into lines of at most 90 s). |
 | 10 | **Push** | Y fully retract to `push_end_y` - the part is pushed forward over the plate's front edge. |
 | 11 | **Lift + bed fully forward** | First lift to `safe_z`, then Y back to `rear_limit` - this also applies after the last object: the pusher NEVER sweeps the plate at `push_z`. |
@@ -140,11 +140,27 @@ The smallest distance = the rear-most object = pushed first.
 **Tie-breaker (6.1):** on equal distance, pick the object whose bbox
 center `(x_min + x_max) / 2` is closest to `X = 0`.
 
-**Push-lane limitation:** if the X bands of two parts overlap, the rear
-part shoves the front part along (cascade) or both jam - the pusher cannot
+**Push-lane limitation:** if the X band of a front part overlaps the
+toolhead lane or the X span of the part pushed before it, the rear part
+shoves the front part along (cascade) or both jam - the pusher cannot
 travel over standing parts. The app **warns** about such layouts before
-printing (no hard block; a cascade may still work). There is no
-collision-free push path for these arrangements.
+printing (no hard block; a cascade may still work).
+
+**Clearance checks (hard block, HTTP 422):** before building, the app
+replays the push order and refuses the plate when
+- the toolhead would descend onto a part: a part in the toolhead's X band
+  ends less than half the toolhead depth + 2 mm in front of the push start,
+- the X gantry would hit a part: during a push the gantry rod
+  (`toolhead.height_to_rod` above the nozzle, A1: 25 mm) sweeps over every
+  part outside the push path that reaches further back than
+  `dist_to_rod` (A1: 56.5 mm) from the push end - on CoreXY machines over
+  every part. Parts taller than the rod height minus `push_z` and 2 mm
+  margin collide. Printers without rod data count every such part,
+- `max_z_height` leaves less than 2 mm to the printer's Z limit,
+- in temperature mode the ejection temperature is not below the print bed
+  temperature (the bed would heat instead of cool).
+`/api/stats` lists the same reasons as warnings, so the UI shows them
+before the build.
 
 ---
 

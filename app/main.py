@@ -14,9 +14,12 @@ from fastapi.responses import HTMLResponse, Response
 
 from . import schedule as sched
 from .gcode import (
+    EjectionUnsafe,
     build_multi_plate_sequence,
+    ejection_clearance_problems,
     ejection_keyframes,
     parse_max_z_height,
+    parse_print_temps,
     schedule_pause_block,
 )
 from .gcode_bbox import (
@@ -407,6 +410,10 @@ async def api_stats(file: UploadFile = File(...)):
                 new_objects.append(entry)
             plate_objects = new_objects
             half_w = true_printer.get("toolhead", {}).get("footprint", {}).get("width", 36.0) / 2.0
+            named = [{**t, "name": e["name"]} for t, e in zip(true_objects, new_objects, strict=True)]
+            plate_top = p.max_z_height or max((t.get("z_max") or 0) for t in true_objects) or 20.0
+            for msg in ejection_clearance_problems(named, true_printer, plate_top):
+                warnings.append(f"Plate {p.index}: the build will be refused - {msg}")
             for rear, at_risk in find_push_lane_conflicts(true_objects, half_w):
                 rn = rear.get("name") or f"Object {rear['id']}"
                 an = at_risk.get("name") or f"Object {at_risk['id']}"
@@ -697,6 +704,24 @@ async def api_sequence(
                     f"{min_height_mm}mm (risk of toolhead jam). Slice a taller object or lower the check.",
                 )
 
+    # ----- collision / clearance check per selected plate -----
+    problems = []
+    for idx in sorted(active):
+        for msg in ejection_clearance_problems(
+            plate_objects[idx], true_printer, plate_max_z[idx], push_z=push_z, t_lift=t_lift,
+        ):
+            problems.append(f"Plate {idx}: {msg}")
+        # cooling to a temperature at/above the print bed temperature heats
+        # the bed instead of releasing the part
+        bed_temp = parse_print_temps(gcodes[idx])[0]
+        if cool_time_s == 0 and bed_temp and cool_temp_bed >= bed_temp:
+            problems.append(
+                f"Plate {idx}: ejection bed temp {cool_temp_bed} °C is not below the print bed "
+                f"temperature ({bed_temp} °C) - the bed would heat instead of cool"
+            )
+    if problems:
+        raise HTTPException(422, "Ejection is not safe: " + " | ".join(problems))
+
     durations = _job_durations(info, active, plate_objects, cool_time_s, safety_wait_s)
     job_waits: dict = {}
     total_prediction = float(sum(durations))
@@ -711,22 +736,25 @@ async def api_sequence(
                     resume_at=sched.fmt_hhmm(start_s + j["start_s"]), bambu=bambu,
                 )
 
-    new_gcode, _notes = await run_in_threadpool(
-        build_multi_plate_sequence,
-        gcodes,
-        active,
-        t_lift=t_lift,
-        push_z=push_z,
-        cool_temp_bed=cool_temp_bed,
-        safety_wait_s=safety_wait_s,
-        cool_time_s=cool_time_s,
-        eject_enabled=True,
-        min_height_mm=min_height_mm,
-        printer=true_printer,
-        plate_objects=plate_objects,
-        plate_max_z=plate_max_z,
-        job_waits=job_waits,
-    )
+    try:
+        new_gcode, _notes = await run_in_threadpool(
+            build_multi_plate_sequence,
+            {idx: gcodes[idx] for idx in active},
+            active,
+            t_lift=t_lift,
+            push_z=push_z,
+            cool_temp_bed=cool_temp_bed,
+            safety_wait_s=safety_wait_s,
+            cool_time_s=cool_time_s,
+            eject_enabled=True,
+            min_height_mm=min_height_mm,
+            printer=true_printer,
+            plate_objects=plate_objects,
+            plate_max_z=plate_max_z,
+            job_waits=job_waits,
+        )
+    except EjectionUnsafe as exc:
+        raise HTTPException(422, f"Ejection is not safe: {exc}") from None
 
     # slice_info totals of the remaining plate: printed weight/time of ALL jobs
     total_prints = sum(active.values())

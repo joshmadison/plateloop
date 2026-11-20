@@ -11,6 +11,11 @@
   lowest object on each plate, measured from the gcode.
 - Objects sharing one push lane (overlapping X range) can cascade off together
   or jam. The app warns about these layouts before building.
+- Plates the ejection cannot clear safely are refused: parts that the X
+  gantry would sweep over during a push (on the A1 anything taller than about
+  22 mm next to the pushed part), parts too close to the rear park position,
+  and parts within 2 mm of the printer's Z limit. Plates with one part, or
+  with all parts in one push lane, are not affected.
 - Push behavior is **verified on the Bambu Lab A1**. A1 mini and A2L share the
   same mechanics and are marked *expected*. CoreXY models (P1, P2, X1, X2 and
   H2 series) move the toolhead instead of the bed — plausible, but needs a

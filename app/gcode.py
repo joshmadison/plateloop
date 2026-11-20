@@ -34,11 +34,31 @@ def find_block_indices(lines: list) -> tuple:
     return exec_start, exec_end
 
 
+MACHINE_END_START = "; MACHINE_END_GCODE_START"
+
+
 def _shutdown_split_index(lines: list) -> int:
-    """First line index of the native shutdown inside the exec block."""
+    """First line index of the native shutdown inside the exec block.
+
+    The shutdown starts at the first 'M140 S0' of the machine END gcode.
+    Searching from the top would also hit a start gcode or layer change that
+    sets the bed to 0 C (bed temp 0 for other layers, Klipper-style starts)
+    and turn the whole print into the "shutdown". The search starts at
+    '; MACHINE_END_GCODE_START' (Bambu/Orca) or, without that marker, after
+    the last layer change.
+    """
+    begin = 0
     for i, line in enumerate(lines):
-        s = line.strip()
-        if s.startswith("M140 S0"):
+        if line.strip() == MACHINE_END_START:
+            begin = i
+            break
+    else:
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].startswith("; CHANGE_LAYER") or lines[i].startswith(";LAYER_CHANGE"):
+                begin = i
+                break
+    for i in range(begin, len(lines)):
+        if lines[i].strip().startswith("M140 S0"):
             return i
     return -1
 
@@ -124,25 +144,48 @@ def build_purge_free_start(exec_block_lines: list, nozzle_temp: int | None = Non
     return kept
 
 
-def parse_print_temps(gcode: str) -> tuple:
-    """(bed_temp, nozzle_temp) from real commands of the exec block.
+_PRINT_NOZZLE_MIN_C = 180
 
-    The M104 patterns are line-anchored: the CONFIG_BLOCK metadata comment
-    'machine_end_gcode = ... M104 S0' must never match (it would re-heat to
-    a cold nozzle).
+
+def parse_print_temps(gcode: str) -> tuple:
+    r"""(bed_temp, nozzle_temp) of the first layer.
+
+    Nozzle, first match wins:
+      1. 'M104 S<t> ; prepare to print' (A1 start: the first filament's
+         first-layer temperature)
+      2. slicer config 'nozzle_temperature_initial_layer = 220[,230...]' /
+         'first_layer_temperature = ...' (first filament)
+      3. the last M104/M109 target >= 180 C before the first layer (the
+         A1 start also heats to 140/170 C for probing and wiping)
+    0 = unknown; build_multi_plate_sequence refuses to build then.
+    The machine_end_gcode config comment ('... M104 S0') never matches:
+    every command pattern is line-anchored. Patterns use [ \t]* instead of
+    \s* so a match can never run across lines (no quadratic backtracking
+    on crafted whitespace).
     """
     bed = 65
-    nozzle = 220
+    nozzle = 0
     m = re.search(r"^M140 S(\d+)", gcode, re.MULTILINE)
     if m:
         bed = int(m.group(1))
-    m = re.search(r"; first_layer_temperature = (\d+)", gcode)
-    if not m:
-        m = re.search(r"^M104 S(\d+)\s*;?\s*prepare to print", gcode, re.MULTILINE)
-    if not m:
-        m = re.search(r"^M104 S(\d+)", gcode, re.MULTILINE)
+    m = re.search(r"^M104 S(\d+)[ \t]*;[ \t]*prepare to print", gcode, re.MULTILINE)
     if m:
         nozzle = int(m.group(1))
+    if not nozzle:
+        m = re.search(
+            r"^;[ \t]*(?:nozzle_temperature_initial_layer|first_layer_temperature)[ \t]*=[ \t]*(\d+)",
+            gcode, re.MULTILINE,
+        )
+        if m:
+            nozzle = int(m.group(1))
+    if not nozzle:
+        # last real heat-up target before the first layer (flush/standby
+        # temperatures earlier in the start gcode are not the print temp)
+        first_layer = gcode.find("\n; CHANGE_LAYER")
+        start = gcode if first_layer == -1 else gcode[:first_layer]
+        temps = [int(t) for t in re.findall(r"^M10[49] S(\d+)", start, re.MULTILINE)]
+        temps = [t for t in temps if t >= _PRINT_NOZZLE_MIN_C]
+        nozzle = temps[-1] if temps else 0
     return bed, nozzle
 
 
@@ -252,6 +295,156 @@ def schedule_pause_block(
     return "\n".join(lines) + "\n"
 
 
+# Minimum gap between the tallest part and the printer's Z limit: the
+# toolhead travels over the parts at safe_z.
+MIN_Z_CLEARANCE_MM = 2.0
+# Extra margin for the gantry / toolhead clearance checks.
+CLEARANCE_MARGIN_MM = 2.0
+
+
+class EjectionUnsafe(ValueError):
+    """The ejection for this plate would crash into the printer or a part."""
+
+
+def _ejection_geometry(printer: dict) -> dict:
+    machine = printer.get("machine", {})
+    kin = printer.get("kinematics", {})
+    th = printer.get("toolhead", {})
+    printable = machine.get("printable", {})
+    footprint = th.get("footprint", {})
+    clearance_radius = th.get("clearance_radius", 73.0)
+    return {
+        "rear_limit": kin.get("rear_command_limit", 262.0),
+        "front_lip": kin.get("front_lip_y", 0.0),
+        "printable_x": printable.get("x", 256.0),
+        "printable_z": printable.get("z", 0.0) or 0.0,
+        "no_park": kin.get("rear_command_limit_source") == "no_park",
+        "park_avoid": kin.get("park_avoid") or [],
+        "structure": machine.get("structure", "bedslinger"),
+        "head_w": footprint.get("width", min(36.0, clearance_radius * 0.5)),
+        "head_d": footprint.get("depth", 28.0),
+        # unknown rod geometry = 0: every part outside the push path counts
+        "rod_h": th.get("height_to_rod", 0.0) or 0.0,
+        "rod_dist": th.get("dist_to_rod", 0.0) or 0.0,
+    }
+
+
+def _park_y_for(cx: float, geo: dict) -> float:
+    """Y where the toolhead descends behind the part.
+
+    Normally rear_limit; inside a park_avoid zone (A1: nozzle wiper brush
+    at the rear left) the toolhead descends in front of that zone instead.
+    """
+    for zone in geo["park_avoid"]:
+        if zone.get("x_min", 0.0) <= cx <= zone.get("x_max", 0.0):
+            return float(zone["y"])
+    return geo["rear_limit"]
+
+
+def _safe_z(max_z_height: float, t_lift: float, geo: dict) -> float:
+    """Travel height over the parts, capped at the printer's Z limit.
+
+    The A1 start gcode turns the soft endstops off (M211 X0 Y0 Z0), so a
+    Z above printable.z drives Z into the hard stop and loses steps.
+    """
+    safe_z = max_z_height + t_lift
+    z_limit = geo["printable_z"]
+    if z_limit > 0:
+        if max_z_height + MIN_Z_CLEARANCE_MM > z_limit:
+            raise EjectionUnsafe(
+                f"Part height {_fmt(max_z_height)} mm leaves less than "
+                f"{_fmt(MIN_Z_CLEARANCE_MM)} mm to the printer's Z limit "
+                f"({_fmt(z_limit)} mm) - the toolhead cannot travel over it"
+            )
+        safe_z = min(safe_z, z_limit)
+    return round(safe_z, 2)
+
+
+def _norm_objects(objects: list | None, geo: dict, max_z_height: float) -> list:
+    objs = []
+    for o in objects or []:
+        xmin = o.get("x_min", 0.0)
+        xmax = o.get("x_max", 0.0)
+        ymin = o.get("y_min", 0.0)
+        ymax = o.get("y_max", 0.0)
+        if xmax > xmin and ymax > ymin:
+            objs.append({
+                "cx": round((xmin + xmax) / 2, 2),
+                "x_min": xmin, "x_max": xmax,
+                "y_min": ymin, "y_max": ymax,
+                "z_max": o.get("z_max") or max_z_height,
+                "name": o.get("name") or (f"Object {o['id']}" if "id" in o else "object"),
+            })
+    return objs
+
+
+def ejection_clearance_problems(
+    objects: list | None,
+    printer: dict,
+    max_z_height: float,
+    push_z: float = 0.4,
+    t_lift: float = 5.0,
+) -> list:
+    """Collisions the ejection would cause; empty list = safe to build.
+
+    Replays the push order of build_ejection_snippet and checks per cycle:
+    - Z: the tallest part must leave room below the printer's Z limit.
+    - Descend: the toolhead lowers to push_z behind the pushed part; any
+      part within the toolhead's X band whose rear edge is closer to the
+      park position than half the toolhead depth is hit from above.
+    - Gantry: while the push runs at push_z the X gantry (height_to_rod
+      above the nozzle) sweeps over every part outside the push path. On a
+      bedslinger only parts reaching further back than dist_to_rod from
+      the push end are swept; on CoreXY machines all of them.
+    Parts in front of the pushed part inside its X span are shoved along
+    (cascade) - that is a warning (find_push_lane_conflicts), not a crash.
+    """
+    geo = _ejection_geometry(printer)
+    problems = []
+    try:
+        _safe_z(max_z_height, t_lift, geo)
+    except EjectionUnsafe as exc:
+        problems.append(str(exc))
+    objs = _norm_objects(objects, geo, max_z_height)
+    half_w = geo["head_w"] / 2
+    push_end_y = geo["front_lip"]
+    remaining = list(objs)
+    while remaining:
+        obj = _select_next_object(remaining, geo["rear_limit"])
+        remaining.remove(obj)
+        cx = obj["cx"]
+        park_y = _park_y_for(cx, geo)
+        # descend behind the part (and next to any other part in the band)
+        for other in [obj] + remaining:
+            if other["x_max"] > cx - half_w and other["x_min"] < cx + half_w:
+                gap = park_y - other["y_max"]
+                if gap < geo["head_d"] / 2 + CLEARANCE_MARGIN_MM:
+                    problems.append(
+                        f"'{other['name']}' reaches to {_fmt(other['y_max'])} mm - only "
+                        f"{_fmt(gap)} mm in front of the push start (Y {_fmt(park_y)}); "
+                        "the toolhead would descend onto it"
+                    )
+        # gantry sweep over parts outside the push path
+        path_min = min(obj["x_min"], cx - half_w)
+        path_max = max(obj["x_max"], cx + half_w)
+        rod_clear = geo["rod_h"] - push_z - CLEARANCE_MARGIN_MM
+        for other in remaining:
+            in_path = other["x_max"] > path_min and other["x_min"] < path_max
+            if in_path and other["y_max"] <= obj["y_max"]:
+                continue  # shoved along with the pushed part (cascade warning)
+            swept = (geo["structure"] != "bedslinger"
+                     or other["y_max"] > push_end_y + geo["rod_dist"])
+            if swept and other["z_max"] > rod_clear:
+                problems.append(
+                    f"'{other['name']}' ({_fmt(other['z_max'])} mm tall) stands outside the push "
+                    f"path of '{obj['name']}' - the X gantry ({_fmt(geo['rod_h'])} mm above the "
+                    "nozzle) would hit it during the push"
+                )
+    # one message per problem
+    seen = set()
+    return [p for p in problems if not (p in seen or seen.add(p))]
+
+
 def build_ejection_snippet(
     max_z_height: float,
     t_lift: float = 5.0,
@@ -267,40 +460,40 @@ def build_ejection_snippet(
 
     Phase 1 (once, after the print ends):
       1. Print done - retract filament (E-6, fixed)
-      2. Lift the toolhead to safe_z = max_z_height + t_lift, then hotend and
-         fans off: the nozzle must not idle hot over the plate while the
-         part cools (ooze, burnt PLA on the nozzle before the next probe)
+      2. Lift the toolhead to safe_z = max_z_height + t_lift (capped at the
+         printer's Z limit), then hotend and fans off: the nozzle must not
+         idle hot over the plate while the part cools (ooze, burnt PLA on
+         the nozzle before the next probe)
       3. Bed fully forward - Y to rear_limit (toolhead behind the plate)
-      4. Toolhead X to plate center - plate_center_x = printable.x / 2
-      5. Descend the toolhead to push_z
 
     Phase 2 (repeat until the plate is empty):
       6. Find the next object (dynamic, see _select_next_object)
-      7. Toolhead X to the bbox center
+      7. Toolhead X to the object's bbox center - still at safe_z, so the
+         nozzle never drags along the rear edge (A1 wiper brush) at push_z
+     4b. Inside a park_avoid zone (A1 wiper brush): Y in front of it
+      5. Descend to push_z
+    (Step numbers are kept from ejection_logic.md V2; steps 4/5 used to
+    run once at the plate center before the X move.)
       8. Cool down: cool_time_s == 0 -> wait for cool_temp_bed (M140 + M190);
-         cool_time_s > 0 -> lower the bed target to cool_temp_bed and wait
-         exactly that long (chained G4, max 90 s each), whatever temperature the bed has reached. G-code
-         has no "wait for temperature, but at most N s", and M190 alone can
-         hang forever when the bed cannot get that cool (enclosure, warm
-         room), so the fixed time is the safe choice.
+         cool_time_s > 0 -> bed heater off (M140 S0) and wait exactly that
+         long (chained G4, max 90 s each). G-code has no "wait for
+         temperature, but at most N s", and M190 alone can hang forever
+         when the bed cannot get that cool (enclosure, warm room).
       9. Safety wait safety_wait_s (chained G4, max 90 s each)
      10. Push - Y to front_lip_y (object slides over the plate's front edge)
-     11. Bed fully forward - Y to rear_limit (re-park)
-     -> continue at 6
+     11. Lift to safe_z, bed fully forward (re-park) -> continue at 6
 
     objects: per-object bboxes from parse_object_bboxes() (list of dicts
     with x_min/x_max/y_min/y_max). None/empty = single-object fallback.
+    Raises EjectionUnsafe when the parts leave no room below the Z limit.
     """
     if printer is None:
         from .printer_db import get_printer
         printer = get_printer("A1")
 
-    machine = printer.get("machine", {})
-    kin = printer.get("kinematics", {})
-    rear_limit = kin.get("rear_command_limit", 262.0)
-    front_lip = kin.get("front_lip_y", 0.0)
-    printable_x = machine.get("printable", {}).get("x", 256.0)
-    no_park = kin.get("rear_command_limit_source") == "no_park"
+    geo = _ejection_geometry(printer)
+    rear_limit = geo["rear_limit"]
+    no_park = geo["no_park"]
     park_comment = ("rear bed edge (no park zone - keep the rear-most part clear)"
                     if no_park else "bed fully forward (park)")
     repark_comment = ("rear bed edge (no park zone)" if no_park
@@ -308,25 +501,13 @@ def build_ejection_snippet(
     final_park_comment = ("rear bed edge (final, no park zone)" if no_park
                           else "bed fully forward (final park)")
 
-    safe_z = round(max_z_height + t_lift, 2)
-    push_end_y = round(front_lip, 2)
-    plate_center_x = round(printable_x / 2, 2)
+    safe_z = _safe_z(max_z_height, t_lift, geo)
+    push_end_y = round(geo["front_lip"], 2)
+    plate_center_x = round(geo["printable_x"] / 2, 2)
 
-    objs = []
-    if objects:
-        for o in objects:
-            xmin = o.get("x_min", 0.0)
-            xmax = o.get("x_max", 0.0)
-            ymin = o.get("y_min", 0.0)
-            ymax = o.get("y_max", 0.0)
-            if xmax > xmin and ymax > ymin:
-                objs.append({
-                    "cx": round((xmin + xmax) / 2, 2),
-                    "x_min": xmin, "x_max": xmax,
-                    "y_min": ymin, "y_max": ymax,
-                })
+    objs = _norm_objects(objects, geo, max_z_height)
     if not objs:
-        objs = [{"cx": plate_center_x, "x_min": 0.0, "x_max": printable_x,
+        objs = [{"cx": plate_center_x, "x_min": 0.0, "x_max": geo["printable_x"],
                  "y_min": 0.0, "y_max": rear_limit * 0.8}]
 
     remaining = list(objs)
@@ -353,28 +534,31 @@ def build_ejection_snippet(
             if printer.get("vendor") == "bambu" else []
         ),
         f"G1 Y{_fmt(rear_limit)} F12000 ; step 3: {park_comment}",
-        f"G1 X{_fmt(plate_center_x)} F12000 ; step 4: toolhead to plate center",
-        f"G1 Z{_fmt(push_z)} F600 ; step 5: descend to push height",
     ]
 
     cycle = 0
+    current_y = rear_limit
     while remaining:
         cycle += 1
         obj = _select_next_object(remaining, rear_limit)
         remaining.remove(obj)
         tag = f" (object {cycle}/{len(objs)})" if len(objs) > 1 else ""
+        park_y = _park_y_for(obj["cx"], geo)
 
         lines.append(f"; ===== Phase 2: ejection cycle {cycle}/{len(objs)} =====")
         lines.append(
             f"G1 X{_fmt(obj['cx'])} F12000 ; step 7{tag}: toolhead to object center "
-            f"(cx={_fmt(obj['cx'])})"
+            f"at safe height (cx={_fmt(obj['cx'])})"
         )
-        if cool_time_s > 0:
-            # lower the target instead of M140 S0: 'M140 S0' marks the native
-            # shutdown, which the merge and the parsers rely on
+        if park_y != current_y:
             lines.append(
-                f"M140 S{cool_temp_bed} ; step 8: lower bed target, heater stays off while cooling"
+                f"G1 Y{_fmt(park_y)} F12000 ; step 4b{tag}: move in front of the "
+                "wiper brush / park-avoid zone"
             )
+            current_y = park_y
+        lines.append(f"G1 Z{_fmt(push_z)} F600 ; step 5{tag}: descend to push height")
+        if cool_time_s > 0:
+            lines.append("M140 S0 ; step 8: bed heater off while cooling")
             lines.extend(
                 _dwell_lines(cool_time_s, f"step 8: cool down for {_fmt_duration_s(cool_time_s)}")
             )
@@ -386,6 +570,7 @@ def build_ejection_snippet(
             f"G1 Y{_fmt(push_end_y)} F{push_speed} ; step 10{tag}: push - "
             f"bed fully retracts, toolhead pushes object off plate"
         )
+        current_y = push_end_y
         if remaining:
             lines.append(
                 f"G1 Z{_fmt(safe_z)} F3000 ; step 11a: lift to safe height "
@@ -394,9 +579,7 @@ def build_ejection_snippet(
             lines.append(
                 f"G1 Y{_fmt(rear_limit)} F12000 ; step 11b: {repark_comment}"
             )
-            lines.append(
-                f"G1 Z{_fmt(push_z)} F600 ; step 11c: descend to push height"
-            )
+            current_y = rear_limit
         else:
             lines.append(
                 f"G1 Z{_fmt(safe_z)} F3000 ; step 11a: lift to safe height (final)"
@@ -472,14 +655,18 @@ def ejection_keyframes(
     machine = printer.get("machine", {})
     kin = printer.get("kinematics", {})
     th = printer.get("toolhead", {})
-    rear_limit = kin.get("rear_command_limit", 262.0)
-    front_lip = kin.get("front_lip_y", 0.0)
-    printable_x = machine.get("printable", {}).get("x", 256.0)
+    geo = _ejection_geometry(printer)
+    rear_limit = geo["rear_limit"]
+    printable_x = geo["printable_x"]
 
     no_park = kin.get("rear_command_limit_source") == "no_park"
 
-    safe_z = round(max_z_height + t_lift, 2)
-    push_end_y = round(front_lip, 2)
+    try:
+        safe_z = _safe_z(max_z_height, t_lift, geo)
+    except EjectionUnsafe:
+        # the build refuses this plate; the preview still shows the motion
+        safe_z = round(max_z_height + t_lift, 2)
+    push_end_y = round(geo["front_lip"], 2)
     plate_center_x = round(printable_x / 2, 2)
 
     clearance_radius = th.get("clearance_radius", 73.0)
@@ -542,9 +729,6 @@ def ejection_keyframes(
                        if no_park else
                        "Bed slides fully forward - toolhead parks behind the plate"),
               end_x, rear_limit, safe_z)
-    add_frame("center", "Toolhead moves to plate center", plate_center_x, rear_limit, safe_z)
-    add_frame("descend", f"Toolhead descends to push height ({_fmt(push_z)} mm)",
-              plate_center_x, rear_limit, push_z)
 
     # Phase 2 (per object). obj_index refers to the input bbox list (same
     # order as objects_bboxes from /api/animation); 'pushed' = cumulative
@@ -572,14 +756,20 @@ def ejection_keyframes(
         if oidx not in gone_set:
             lane.insert(0, oidx)
 
-        add_frame(f"xcycle{cycle}", f"Toolhead moves to object center{tag}",
-                  obj["cx"], rear_limit, push_z, obj_index=oidx, pushed_list=pushed)
+        park_y = _park_y_for(obj["cx"], geo)
+        add_frame(f"xcycle{cycle}", f"Toolhead moves to object center at safe height{tag}",
+                  obj["cx"], rear_limit, safe_z, obj_index=oidx, pushed_list=pushed)
+        if park_y != rear_limit:
+            add_frame(f"avoid{cycle}", f"Move in front of the wiper brush{tag}",
+                      obj["cx"], park_y, safe_z, obj_index=oidx, pushed_list=pushed)
+        add_frame(f"lower{cycle}", f"Toolhead descends to push height ({_fmt(push_z)} mm){tag}",
+                  obj["cx"], park_y, push_z, obj_index=oidx, pushed_list=pushed)
         cool_label = (f"Cooling for {_fmt_duration_s(cool_time_s)}" if cool_time_s > 0
                       else f"Cooling to {cool_temp_bed}°C")
         add_frame(f"cool{cycle}", f"{cool_label}{tag}",
-                  obj["cx"], rear_limit, push_z, obj_index=oidx, pushed_list=pushed, wait=True)
+                  obj["cx"], park_y, push_z, obj_index=oidx, pushed_list=pushed, wait=True)
         add_frame(f"wait{cycle}", f"Safety wait {safety_wait_s}s{tag}",
-                  obj["cx"], rear_limit, push_z, obj_index=oidx, pushed_list=pushed, wait=True)
+                  obj["cx"], park_y, push_z, obj_index=oidx, pushed_list=pushed, wait=True)
 
         pushed.append(oidx)
         contact_y = obj["y_max"]
@@ -605,8 +795,6 @@ def ejection_keyframes(
             add_frame(f"repark{cycle}", ("Rear bed edge - re-park (no park zone)" if no_park
                                          else "Bed fully forward - re-park") + tag,
                       obj["cx"], rear_limit, safe_z, obj_index=oidx, pushed_list=pushed)
-            add_frame(f"descend{cycle}", f"Descend to push height{tag}",
-                      obj["cx"], rear_limit, push_z, obj_index=oidx, pushed_list=pushed)
 
     add_frame("done_all", "Plate empty - ready for next print",
               objs[pushed[-1]]["cx"], rear_limit, safe_z, pushed_list=pushed)
@@ -682,7 +870,15 @@ def build_multi_plate_sequence(
 
     pinfo: dict = {}
     purge_free_used = False
+    active = {idx for idx, _ in jobs}
     for idx, gcode in plate_gcodes.items():
+        if idx not in active:
+            continue  # skipped plates are never split (memory) or checked
+        if parse_print_temps(gcode)[1] < _PRINT_NOZZLE_MIN_C:
+            raise EjectionUnsafe(
+                f"Plate {idx}: could not determine the nozzle print temperature - "
+                "refusing to build (the next copy would start with a cold nozzle)"
+            )
         lines = gcode.splitlines(keepends=True)
         exec_start, exec_end = find_block_indices(lines)
         has_markers = exec_start != -1 and exec_end != -1
