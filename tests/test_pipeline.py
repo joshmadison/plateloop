@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import zipfile
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
@@ -116,12 +117,14 @@ GCODE_PURGE = """; HEADER_BLOCK_START
 M140 S65
 M109 S220
 G28
-;===== auto extrude cali start =========================
+;===== extrude cali test ===============================
 M622 J1
     G0 X128 E10 F720
     G0 X148 E.3742 F4800
 M623
-;===== auto extrude cali end ========================
+;========turn off light and wait extrude temperature =============
+G29.1 Z-0.02 ; for Textured PEI Plate
+M106 S0 ; turn off fan
 ; MACHINE_START_GCODE_END
 G1 X120 Y1.2 F6000
 G1 X140 Y1.2 E.5 F6000 ; purge line on plate edge
@@ -911,3 +914,93 @@ def test_thumbnail_never_crosses_plates():
     data = buf.getvalue()
     assert extract_thumbnail(io.BytesIO(data), plate=2) == PNG_1PX
     assert extract_thumbnail(io.BytesIO(data), plate=1) is None
+
+
+# ---- real A1 start gcode (Bambu Studio 02.09, A1 start gcode 2026-05-13) ----
+
+_A1_START = (Path(__file__).parent / "fixtures" / "a1_start_20260513.gcode").read_text(encoding="utf-8")
+
+
+def _a1_gcode() -> str:
+    return (
+        "; HEADER_BLOCK_START\n"
+        "; max_z_height: 30.00\n"
+        "; HEADER_BLOCK_END\n"
+        + _A1_START
+        + "; CHANGE_LAYER\n"
+        "; Z_HEIGHT: 0.2\n"
+        "G1 X100 Y100 F42000\n"
+        "G1 Z.2\n"
+        "G1 X150 Y100 E2.0 F3000\n"
+        "G1 X150 Y150 E3.0 F3000\n"
+        "M400\n"
+        "M140 S0 ; turn off bed\n"
+        "M104 S0 ; turn off hotend\n"
+        "M18 X Y Z\n"
+        "; EXECUTABLE_BLOCK_END\n"
+    )
+
+
+def _job_start(gcode: str, job_no: int) -> list:
+    """Lines of one job from its start marker up to its first layer."""
+    ls = gcode.splitlines()
+    if job_no == 1:
+        i = 0
+    else:
+        i = next(k for k, ln in enumerate(ls) if f"plateloop print {job_no} of" in ln)
+    j = next(k for k in range(i, len(ls)) if ls[k].startswith("; CHANGE_LAYER"))
+    return ls[i:j]
+
+
+def test_a1_purge_free_start_keeps_cleaning_and_leveling():
+    """Prints 2+ drop only the front purge line - cleaning, leveling and
+    the textured-PEI offset stay (the A1 probes the bed with the nozzle)."""
+    new_gc, _ = build_multi_plate_sequence(
+        {1: _a1_gcode()}, {1: 2}, cool_time_s=300, min_height_mm=0,
+        plate_max_z={1: 30.0},
+    )
+    first = "\n".join(_job_start(new_gc, 1))
+    second = "\n".join(_job_start(new_gc, 2))
+    assert "G0 X128 E8" in first, "copy 1 keeps the purge line"
+    assert "G0 X128 E8" not in second and "G0 X128 E10" not in second, "no purge line on prints 2+"
+    for kept in (";===== wipe nozzle ====", ";===== brush material wipe nozzle =====",
+                 "G28 Z P0 T300", ";===== auto extrude cali start", "G29 A1 ",
+                 "G29.1 Z-0.02", "M1007 S1", "G29.4"):
+        assert kept in second, f"{kept!r} must stay in the start of print 2"
+    # nothing is extruded onto the plate before the first layer (flushes run
+    # off the plate at X-48.2 / at the rear Y254 position like copy 1)
+    assert not any(re.match(r"\s*G[01] .*X(1[0-9]{2}|[1-9][0-9])\.?\d* .*E\d", ln)
+                   for ln in second.splitlines())
+
+
+def test_a1_every_print_waits_for_print_temp_before_first_layer():
+    """The last temperature command before the first layer must be a WAIT
+    for the print temperature - copy 2 used to start at the 140 C probe temp."""
+    new_gc, _ = build_multi_plate_sequence(
+        {1: _a1_gcode()}, {1: 3}, cool_time_s=300, min_height_mm=0,
+        plate_max_z={1: 30.0},
+    )
+    for job in (1, 2, 3):
+        temps = [ln.strip() for ln in _job_start(new_gc, job)
+                 if re.match(r"\s*M10[49] S\d+", ln)]
+        assert temps, f"print {job}: no nozzle temperature commands"
+        assert temps[-1].startswith("M109 S220"), f"print {job}: last temp command is {temps[-1]!r}"
+
+
+def test_ejection_turns_hotend_and_fans_off_while_waiting():
+    """While the part cools the nozzle must not idle hot over the plate."""
+    new_gc, _ = build_multi_plate_sequence(
+        {1: _a1_gcode()}, {1: 2}, cool_time_s=300, min_height_mm=0,
+        plate_max_z={1: 30.0},
+    )
+    ls = new_gc.splitlines()
+    begin = next(k for k, ln in enumerate(ls) if "plateloop auto-ejection (generated)" in ln)
+    lift = next(k for k in range(begin, len(ls)) if "step 2: lift" in ls[k])
+    cool = next(k for k in range(begin, len(ls)) if "step 8" in ls[k])
+    block = ls[lift:cool]
+    assert any(ln.startswith("M104 S0") for ln in block), "hotend off before the cooldown"
+    assert any(ln.startswith("M106 S0") for ln in block), "part fan off before the cooldown"
+    # re-heat only puts the nozzle on standby; the start gcode cleans it first
+    reheat = ls[next(k for k, ln in enumerate(ls) if ln.startswith("; re-heat for next print")):][:5]
+    assert "M104 S140 ; nozzle standby (no ooze before cleaning)" in reheat
+    assert not any(ln.startswith("M109 S220") for ln in reheat)

@@ -44,14 +44,21 @@ def _shutdown_split_index(lines: list) -> int:
 
 
 START_GCODE_END = "; MACHINE_START_GCODE_END"
+REHEAT_NOZZLE_STANDBY = 140
 
+# Only the sections that extrude ONTO the plate are dropped for prints 2+.
+# Nozzle cleaning (';===== wipe nozzle', brush + steel wipe + Z re-home) and
+# the off-plate flow calibration (';===== auto extrude cali') stay: the A1
+# probes the bed with the nozzle, so it must be clean before G29.
+# A section without an end banner ends at the next ';=====' banner (or the
+# start-gcode end): ';===== extrude cali test' is followed by the
+# ';========turn off light ...' section with G29.1 (textured PEI offset),
+# fans off and G29.4, which must stay.
 _PURGE_SECTION_BANNERS = [
-    (";===== auto extrude cali start", ";===== auto extrude cali end"),
-    (";===== wipe nozzle ", ";===== wipe nozzle end"),
-    ("; wipe nozzle ", "; wipe nozzle end"),
     (";===== nozzle load line ", ";===== nozzle load line end"),
     (";===== extrude cali test ", None),
 ]
+_SECTION_BANNER = ";====="
 
 
 def split_start_block(exec_block_lines: list) -> tuple:
@@ -76,14 +83,27 @@ def find_purge_zones(exec_block_lines: list) -> list:
                 spans.append((si, i))
                 si = -1
         if si != -1 and end_banner is None:
-            ei = next((j for j, ln in enumerate(exec_block_lines) if ln.strip() == START_GCODE_END), len(exec_block_lines))
+            ei = next(
+                (
+                    j for j in range(si + 1, len(exec_block_lines))
+                    if exec_block_lines[j].strip() == START_GCODE_END
+                    or exec_block_lines[j].strip().startswith(_SECTION_BANNER)
+                ),
+                len(exec_block_lines),
+            )
             if ei > si:
                 spans.append((si, ei - 1))
     return spans
 
 
-def build_purge_free_start(exec_block_lines: list) -> list | None:
-    """Machine-start section WITHOUT the first-print purge/cali strip."""
+def build_purge_free_start(exec_block_lines: list, nozzle_temp: int | None = None) -> list | None:
+    """Machine-start section WITHOUT the first-print purge line.
+
+    The dropped purge section also held the only 'M109 <print temp>' of the
+    A1 start (after leveling the nozzle sits at 140 C and 'M104 S220 ;
+    prepare to print' does not wait). With nozzle_temp the start therefore
+    ends with: lift off the plate edge, wait for the print temperature.
+    """
     pre, _post = split_start_block(exec_block_lines)
     if _post and not pre:
         return None
@@ -94,6 +114,13 @@ def build_purge_free_start(exec_block_lines: list) -> list | None:
     for a, b in spans:
         drop.update(range(a, b + 1))
     kept = [ln for i, ln in enumerate(pre) if i not in drop]
+    if nozzle_temp:
+        kept.extend([
+            "; plateloop: no purge line on prints 2+ - lift off the plate edge\n",
+            "G90\n",
+            "G1 Z5 F1200\n",
+            f"M109 S{nozzle_temp} ; plateloop: wait for print temperature before the first layer\n",
+        ])
     return kept
 
 
@@ -240,7 +267,9 @@ def build_ejection_snippet(
 
     Phase 1 (once, after the print ends):
       1. Print done - retract filament (E-6, fixed)
-      2. Lift the toolhead to safe_z = max_z_height + t_lift
+      2. Lift the toolhead to safe_z = max_z_height + t_lift, then hotend and
+         fans off: the nozzle must not idle hot over the plate while the
+         part cools (ooze, burnt PLA on the nozzle before the next probe)
       3. Bed fully forward - Y to rear_limit (toolhead behind the plate)
       4. Toolhead X to plate center - plate_center_x = printable.x / 2
       5. Descend the toolhead to push_z
@@ -317,6 +346,12 @@ def build_ejection_snippet(
         "G1 E-6.0 F1200 ; step 1: retract filament",
         "G90",
         f"G1 Z{_fmt(safe_z)} F3000 ; step 2: lift toolhead to safe height",
+        "M104 S0 ; step 2b: hotend off while the part cools (no ooze)",
+        "M106 S0 ; step 2b: part cooling fan off",
+        *(
+            ["M106 P2 S0 ; step 2b: aux fan off", "M106 P3 S0 ; step 2b: chamber fan off"]
+            if printer.get("vendor") == "bambu" else []
+        ),
         f"G1 Y{_fmt(rear_limit)} F12000 ; step 3: {park_comment}",
         f"G1 X{_fmt(plate_center_x)} F12000 ; step 4: toolhead to plate center",
         f"G1 Z{_fmt(push_z)} F600 ; step 5: descend to push height",
@@ -618,8 +653,9 @@ def build_multi_plate_sequence(
     job is followed by that plate's ejection push (including the very last
     job). The first-print purge/calibration strip runs exactly ONCE for the
     whole sequence; every later job (including the first print of the next
-    plate) uses its plate's purge-free start. Re-heat targets the NEXT job's
-    plate temps. The native shutdown runs only after the very last job.
+    plate) uses its plate's purge-free start (cleaning + leveling kept, wait
+    for print temperature before the first layer). Re-heat targets the NEXT
+    job's bed temp; the nozzle only goes to standby. The native shutdown runs only after the very last job.
 
     plate_gcodes:  {plate_index: gcode_text}
     plate_prints:  {plate_index: total_prints}
@@ -659,7 +695,7 @@ def build_multi_plate_sequence(
             body_rest = body
             _pre, post = split_start_block(exec_block)
             if post and eject_enabled:
-                purge_free = build_purge_free_start(exec_block)
+                purge_free = build_purge_free_start(exec_block, parse_print_temps(gcode)[1])
                 if purge_free is not None:
                     body_rest = _strip_native_shutdown(purge_free + post)
                     purge_free_used = True
@@ -698,13 +734,16 @@ def build_multi_plate_sequence(
             if eject_enabled
             else ""
         )
-        bed_temp, nozzle_temp = parse_print_temps(gcode)
+        bed_temp, _nozzle_temp = parse_print_temps(gcode)
+        # The nozzle is only preheated (140 C, the A1 start's own standby
+        # value): at print temperature it would ooze before the start gcode
+        # cleans it. The start gcode heats to print temperature itself; the
+        # purge-free start ends with an explicit M109.
         reheat = (
             f"; re-heat for next print\n"
             f"M140 S{bed_temp} ; heat bed\n"
+            f"M104 S{REHEAT_NOZZLE_STANDBY} ; nozzle standby (no ooze before cleaning)\n"
             f"M190 S{bed_temp} ; wait bed\n"
-            f"M104 S{nozzle_temp} ; heat nozzle\n"
-            f"M109 S{nozzle_temp} ; wait nozzle\n"
         )
         pinfo[idx] = {
             "header": header,

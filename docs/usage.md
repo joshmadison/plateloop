@@ -44,7 +44,7 @@
 
 ```mermaid
 flowchart TD
-    A([Print finished]) --> B[Retract filament<br/>lift to safe Z]
+    A([Print finished]) --> B[Retract filament<br/>lift to safe Z<br/>hotend and fans off]
     B --> C[Bed fully forward<br/>toolhead parks behind plate]
     C --> D[Pick rear-most object]
     D --> E[Move X to object center]
@@ -55,8 +55,8 @@ flowchart TD
     H -- no --> W{Print window<br/>closed?}
     W -- yes --> X[Heaters and fans off<br/>wait for the next window]
     X --> I
-    W -- no --> I[Re-heat]
-    I --> J[Next copy]
+    W -- no --> I[Re-heat bed<br/>nozzle standby]
+    I --> J[Next copy: clean nozzle,<br/>level, heat, print]
     J --> A
 ```
 
@@ -74,8 +74,9 @@ single-plate `.gcode.3mf` whose gcode runs the plates back to back:
 
 - every plate is printed as often as configured,
 - every print is followed by that plate's ejection push,
-- the first-print purge/calibration strip runs **once** for the whole sequence,
-- homing and leveling still run before every print,
+- the first-print purge line runs **once** for the whole sequence,
+- nozzle cleaning, homing and leveling still run before every print, and every
+  print waits for the print temperature before its first layer,
 - the native shutdown runs only after the very last job.
 
 ## The download

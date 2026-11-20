@@ -98,6 +98,7 @@ starts at `rear_command_limit = printable.y` instead.
 |---|---|---|
 | 1 | **Print done** - last gcode move finished, retract filament | `E-6` (fixed) |
 | 2 | **Lift the toolhead** to `safe_z` | `safe_z = max_z_height + t_lift` |
+| 2b | **Hotend and fans off** while the part cools: a nozzle idling hot over the plate oozes and burns PLA onto the tip, and the A1 probes the bed with that tip before the next print | `M104 S0`, `M106 S0` (+ `P2`/`P3` on Bambu) |
 | 3 | **Bed fully forward** - Y to `rear_limit` (pusher behind the plate) | `rear_limit` |
 | 4 | **Toolhead X to plate center** | `plate_center_x` |
 | 5 | **Descend the toolhead** to `push_z` (pusher at min gap above the plate) | `push_z` |
@@ -119,7 +120,7 @@ starts at `rear_command_limit = printable.y` instead.
 
 | Step | Action |
 |---|---|
-| 12 | **Plate empty** -> re-heat (bed + nozzle to print temperature) + next print starts. |
+| 12 | **Plate empty** -> re-heat: bed to print temperature, nozzle only to 140 °C standby. The next print's start gcode cleans the nozzle, levels the bed and waits for the print temperature before the first layer. |
 
 ---
 
@@ -155,10 +156,16 @@ collision-free push path for these arrangements.
   (`plate_prints`, 0 = skip),
 - every print (including the very last) is followed by that plate's
   ejection push,
-- the first-print purge/calibration strip runs **exactly once** for the
-  whole sequence; every later print uses its plate's purge-free start
-  (so the purge never extrudes onto an ejected cold part),
-- re-heat targets the NEXT job's plate temperatures,
+- the first-print purge line runs **exactly once** for the whole sequence;
+  every later print uses its plate's purge-free start (so the purge never
+  extrudes onto an ejected cold part). Only the sections that extrude onto
+  the plate are dropped (`nozzle load line`, `extrude cali test` up to the
+  next section banner). Nozzle cleaning (`wipe nozzle`), the off-plate flow
+  calibration, bed leveling and the textured-PEI offset stay. The dropped
+  section held the start's only wait for the print temperature, so the
+  purge-free start ends with `G1 Z5` + `M109 S<print temp>`,
+- re-heat targets the NEXT job's bed temperature; the nozzle only goes to
+  140 °C standby,
 - the native shutdown runs only after the very last job.
 
 ---

@@ -84,13 +84,15 @@ M140 S65
 M104 S220
 M109 S220
 G28
-;===== auto extrude cali start =========================
+;===== extrude cali test ===============================
 M1002 judge_flag extrude_cali_flag
 M622 J1
     G0 X128 E10 F720
     G0 X148 E.3742 F4800
 M623
-;===== auto extrude cali end ========================
+;========turn off light and wait extrude temperature =============
+G29.1 Z-0.02 ; for Textured PEI Plate
+M106 S0 ; turn off fan
 ; MACHINE_START_GCODE_END
 G1 X120 Y1.2 F6000
 G1 X140 Y1.2 E.5 F6000 ; purge line on plate edge
